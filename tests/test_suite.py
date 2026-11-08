@@ -126,11 +126,17 @@ class StimulusTests(unittest.TestCase):
             fft = tuple(round(value * 255) for value in profile)
             packet = decode_packet(audio_sync_packet(1, "10.0.0.1:11988", fft=fft))
 
-            result = compare_to_models(audio, [packet])
+            result = compare_to_models(audio, [packet], playback_start_ns=1)
 
         self.assertEqual(result["best_match"], "no_pink_correction")
         self.assertIn("linear_band_split", [item["model"] for item in result["ranked_hypotheses"]])
         self.assertIn("wrong_fft_size_256", [item["model"] for item in result["ranked_hypotheses"]])
+        self.assertIn("wrong_scaling_none", [item["model"] for item in result["ranked_hypotheses"]])
+        self.assertTrue(result["stateful_mutant_scores"]["available"])
+        self.assertIn(
+            "volume_spike_peak_detector",
+            [item["model"] for item in result["stateful_mutant_scores"]["ranked_hypotheses"]],
+        )
         self.assertEqual(result["scope"].split(";")[0], "diagnostic fingerprint only")
 
 

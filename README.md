@@ -84,9 +84,11 @@ received packet.
 The report separates per-band temporal shape correlation and normalized profile
 error from level ratio in dB. When a case references an audio fixture, it also
 ranks simplified FFT-band fingerprints (including mapping, sample-rate, FFT-size,
-pink-correction and scaling variants). This is a diagnostic approximation, not a
-bit-accurate or hardware-validated MoonModules reference; tied or unmatched
-fingerprints should not be treated as proof of a specific implementation bug.
+pink-correction and scaling variants) and reports temporal hypotheses for
+magnitude-as-amplitude, volume-spike peak detection and disabled AGC. This is a
+diagnostic approximation, not a bit-accurate or hardware-validated MoonModules
+reference; tied or unmatched fingerprints should not be treated as proof of a
+specific implementation bug.
 
 Cases cover tone, sweep, clicks, multi-tone, amplitude modulation, stepped levels,
 and seeded white/pink noise. Unknown or mismatched required settings,

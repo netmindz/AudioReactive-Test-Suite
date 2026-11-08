@@ -701,7 +701,11 @@ def compare(reference_path: str | Path, candidate_path: str | Path, case_path: s
         if audio_path.is_file():
             try:
                 reference_model = compare_to_models(
-                    audio_path, candidate_window, reference_artifact["metadata"].get("settings", {})
+                    audio_path,
+                    candidate_window,
+                    reference_artifact["metadata"].get("settings", {}),
+                    playback_start,
+                    offset_ns,
                 )
             except (OSError, ValueError, wave.Error) as error:
                 reference_model = {"error": str(error)}

@@ -137,8 +137,130 @@ def _fingerprint(
     return [value / total for value in accumulated] if total > 0 else [0.0] * 16
 
 
+def _rms_envelope(samples: list[float], sample_rate: int, frame_size: int) -> tuple[float, list[float]]:
+    hop = max(1, round(sample_rate * 0.02))
+    envelope = []
+    for start in range(0, len(samples) - frame_size + 1, hop):
+        frame = samples[start : start + frame_size]
+        envelope.append(math.sqrt(sum(value * value for value in frame) / len(frame)))
+    return hop / sample_rate, envelope
+
+
+def _correlation(left: list[float], right: list[float]) -> float | None:
+    if len(left) != len(right) or len(left) < 3:
+        return None
+    left_mean = sum(left) / len(left)
+    right_mean = sum(right) / len(right)
+    left_centered = [value - left_mean for value in left]
+    right_centered = [value - right_mean for value in right]
+    left_norm = math.sqrt(sum(value * value for value in left_centered))
+    right_norm = math.sqrt(sum(value * value for value in right_centered))
+    if left_norm <= 1e-9 or right_norm <= 1e-9:
+        return None
+    return sum(a * b for a, b in zip(left_centered, right_centered)) / (left_norm * right_norm)
+
+
+def _stateful_mutant_scores(
+    samples: list[float],
+    sample_rate: int,
+    frame_size: int,
+    candidate_packets: list[Any],
+    playback_start_ns: int | None,
+    candidate_offset_ns: int,
+) -> dict[str, Any]:
+    if playback_start_ns is None or not candidate_packets:
+        return {"available": False, "reason": "playback start and candidate packets are required"}
+    frame_seconds, envelope = _rms_envelope(samples, sample_rate, frame_size)
+    if len(envelope) < 3:
+        return {"available": False, "reason": "audio is too short for temporal model features"}
+
+    def audio_value(packet: Any) -> float | None:
+        elapsed = (packet.timestamp_ns + candidate_offset_ns - playback_start_ns) / 1_000_000_000
+        position = elapsed / frame_seconds
+        index = math.floor(position)
+        if index < 0 or index + 1 >= len(envelope):
+            return None
+        fraction = position - index
+        return envelope[index] + fraction * (envelope[index + 1] - envelope[index])
+
+    aligned = [(packet, audio_value(packet)) for packet in candidate_packets]
+    aligned = [(packet, value) for packet, value in aligned if value is not None]
+    audio_rms = [float(value) for _, value in aligned]
+    volume = [float(packet.volume_raw) for packet, _ in aligned]
+    magnitude = [float(packet.magnitude) for packet, _ in aligned]
+    volume_correlation = _correlation(audio_rms, volume)
+    magnitude_correlation = _correlation(audio_rms, magnitude)
+
+    maximum = max(envelope)
+    threshold = maximum * 0.5
+    predicted_events = [
+        index * frame_seconds
+        for index in range(1, len(envelope))
+        if envelope[index] >= threshold > envelope[index - 1]
+    ]
+    candidate_events = []
+    previously_high = False
+    for packet in candidate_packets:
+        if packet.peak and not previously_high:
+            candidate_events.append(
+                (packet.timestamp_ns + candidate_offset_ns - playback_start_ns) / 1_000_000_000
+            )
+        previously_high = packet.peak
+    remaining = list(candidate_events)
+    matched = 0
+    for predicted in predicted_events:
+        nearest = min(range(len(remaining)), key=lambda index: abs(remaining[index] - predicted), default=None)
+        if nearest is not None and abs(remaining[nearest] - predicted) <= 0.1:
+            matched += 1
+            remaining.pop(nearest)
+    precision = matched / len(candidate_events) if candidate_events else 0.0
+    recall = matched / len(predicted_events) if predicted_events else 0.0
+    peak_f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    stateful = {
+        "available": True,
+        "feature_samples": len(aligned),
+        "magnitude_as_amplitude": {
+            "audio_envelope_correlation": magnitude_correlation,
+            "method": "correlation of packet magnitude with input RMS envelope",
+        },
+        "volume_spike_peak_detector": {
+            "event_f1": peak_f1,
+            "predicted_events": len(predicted_events),
+            "candidate_events": len(candidate_events),
+            "matched_events": matched,
+            "method": "RMS envelope half-maximum rising crossings, 100 ms event tolerance",
+        },
+        "no_agc": {
+            "volume_envelope_correlation": volume_correlation,
+            "method": "correlation of packet raw volume with unprocessed input RMS envelope",
+        },
+        "caveat": "These temporal fingerprints are hypotheses, not a calibrated or bit-accurate AGC/peak model.",
+    }
+    stateful_scores = [
+        ("magnitude_as_amplitude", magnitude_correlation),
+        ("volume_spike_peak_detector", peak_f1),
+        ("no_agc", volume_correlation),
+    ]
+    stateful["ranked_hypotheses"] = [
+        {"model": name, "score": score}
+        for name, score in sorted(
+            ((name, score) for name, score in stateful_scores if score is not None),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+    ]
+    stateful["best_match"] = (
+        stateful["ranked_hypotheses"][0]["model"] if stateful["ranked_hypotheses"] else None
+    )
+    return stateful
+
+
 def compare_to_models(
-    audio_path: str | Path, candidate_packets: list[Any], settings: dict[str, Any] | None = None
+    audio_path: str | Path,
+    candidate_packets: list[Any],
+    settings: dict[str, Any] | None = None,
+    playback_start_ns: int | None = None,
+    candidate_offset_ns: int = 0,
 ) -> dict[str, Any]:
     """Rank simplified DSP hypotheses by normalized FFT-band profile similarity."""
     settings = settings or {}
@@ -208,6 +330,14 @@ def compare_to_models(
             frequency_distribution=frequency_distribution,
             scaling="log",
         ),
+        "wrong_scaling_none": _fingerprint(
+            samples,
+            sample_rate,
+            fft_size=configured_fft_size,
+            interpreted_rate=configured_rate,
+            frequency_distribution=frequency_distribution,
+            scaling="none",
+        ),
     }
     if candidate_packets:
         levels = [
@@ -245,14 +375,12 @@ def compare_to_models(
         "best_match": ranked[0]["model"] if ranked and len(tied) == 1 else None,
         "ambiguous_best_match": len(tied) != 1,
         "ranked_hypotheses": ranked,
-        "unmodeled_mutants": [
-            "magnitude_as_amplitude",
-            "volume_spike_peak_detector",
-            "no_agc",
-            "wrong_scaling_mode_state",
-        ],
-        "unmodeled_reason": (
-            "These variants require calibrated magnitude, volume-envelope, AGC-state or scaling-state "
-            "reference fields; band-profile similarity alone cannot distinguish them."
+        "stateful_mutant_scores": _stateful_mutant_scores(
+            samples,
+            sample_rate,
+            configured_fft_size,
+            candidate_packets,
+            playback_start_ns,
+            candidate_offset_ns,
         ),
     }
