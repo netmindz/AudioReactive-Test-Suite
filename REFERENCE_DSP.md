@@ -22,6 +22,13 @@ At 22,050 Hz a full 512-sample acquisition takes about 23.2 ms, so packet
 updates and FFT updates are not necessarily one-to-one; scheduling, overlapping
 windows and target-specific skipped FFTs also matter. Compare audio behavior
 over time rather than requiring identical packet cadence or unique FFT data.
+The source recommends `WLEDMM_FASTPATH` for multicore FPU targets but does not
+guarantee that a given firmware enables it. With that flag and a multicore FPU,
+the sliding-window build can reuse samples; on a reused-sample run, FFT
+smoothing uses `speed = ln(2) × 1.1` rather than 1. Record the actual build
+and runtime behavior, not an assumption based on the board.
+See [build conditions](https://github.com/MoonModules/WLED-AudioReactive-Usermod/blob/a4338f2ae26e303653c8fffbbb9af975401cefc5/audio_reactive.h#L126-L131)
+and [smoothing](https://github.com/MoonModules/WLED-AudioReactive-Usermod/blob/a4338f2ae26e303653c8fffbbb9af975401cefc5/audio_reactive.h#L1079-L1083).
 
 Default `fftWindow=0` is Blackman-Harris; Hann, Nuttall, Hamming, Flat-top and
 Blackman are selectable. Window-specific correction `wc` is applied to the
@@ -146,7 +153,11 @@ this value. For the [declared arduinoFFT 2.0.1 dependency](https://github.com/Mo
 [`majorPeak`](https://github.com/kosme/arduinoFFT/blob/v2.0.1/src/arduinoFFT.cpp)
 returns the absolute curvature of the three bins around the peak as its
 magnitude, not the peak bin's amplitude. Different library versions can
-behave differently. See [local processing](https://github.com/MoonModules/WLED-AudioReactive-Usermod/blob/a4338f2ae26e303653c8fffbbb9af975401cefc5/audio_reactive.h#L2504-L2511)
+behave differently. Its [frequency interpolation](https://github.com/kosme/arduinoFFT/blob/v2.0.1/src/arduinoFFT.cpp#L190-L195)
+uses `(bin + delta) × sampleRate / (samples - 1)`, except at the top bin,
+where it divides by `samples`. For 512 samples this denominator alone gives
+approximately 0.196% higher frequency than division by 512, before other
+interpolation, weighting and guard effects. See [local processing](https://github.com/MoonModules/WLED-AudioReactive-Usermod/blob/a4338f2ae26e303653c8fffbbb9af975401cefc5/audio_reactive.h#L2504-L2511)
 and [packet assignment](https://github.com/MoonModules/WLED-AudioReactive-Usermod/blob/a4338f2ae26e303653c8fffbbb9af975401cefc5/audio_reactive.h#L1911-L1915).
 See [FFT peak and gate](https://github.com/MoonModules/WLED-AudioReactive-Usermod/blob/a4338f2ae26e303653c8fffbbb9af975401cefc5/audio_reactive.h#L940-L990).
 

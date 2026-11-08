@@ -33,10 +33,11 @@ not automatic candidate failures. Saved hardware captures remain useful when
 native porting is infeasible and real hardware remains the final ground truth.
 
 The per-sender manifest must state sample rate, FFT size and window, averaging
-mode, frequency distribution, mic filter and quality, pink profile, FFT
-scaling, gain/input level, AGC mode, squelch, peak bin/threshold and dynamics
-limiter, as applicable to the selected revision. Reference and candidate
-adapters report actual settings and map equivalent names and units.
+mode, `WLEDMM_FASTPATH` build status and sliding-window/reused-sample behavior,
+frequency distribution, mic filter and quality, pink profile, FFT scaling,
+gain/input level, AGC mode, squelch, peak bin/threshold and dynamics limiter,
+as applicable to the selected revision. Reference and candidate adapters report
+actual settings and map equivalent names and units.
 Compare settings before scoring: required unknown or mismatched settings make
 the affected cases inconclusive. An explicit, documented equivalence or
 calibration can make differing physical input paths comparable; it must not
