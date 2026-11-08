@@ -70,8 +70,10 @@ def _fingerprint(
     average_mode: str = "mean",
     agc_post_gain: float = 1.0,
     pcm_to_fft_scale: float = 1.0,
+    frame_stride: int = 1,
+    normalize_output: bool = True,
 ) -> list[float]:
-    hop = max(1, round(sample_rate * 0.02))
+    hop = max(1, round(sample_rate * 0.02)) * max(1, frame_stride)
     if mapping == "linear_band_split":
         bands = [(low, high, 1.0) for low, high in _mapping_for(
             fft_size, sample_rate, mapping, interpreted_rate, frequency_distribution
@@ -146,6 +148,8 @@ def _fingerprint(
     if frame_count == 0:
         return [0.0] * 16
     accumulated = [value / frame_count for value in accumulated]
+    if not normalize_output:
+        return accumulated
     total = sum(accumulated)
     return [value / total for value in accumulated] if total > 0 else [0.0] * 16
 
@@ -173,27 +177,99 @@ def _scale_fft_value(value: float, band: int, mode: int | str, *, agc_post_gain:
     return max(0, min(255, int(current + 0.5)))
 
 
-def _observed_profile(packets: list[Any]) -> list[float]:
-    if not packets:
-        return [0.0] * 16
-    levels = [sum(float(packet.fft[band]) for packet in packets) / len(packets) for band in range(16)]
+def _normalize_profile(levels: list[float]) -> list[float]:
     total = sum(levels)
     return [value / total for value in levels] if total > 0 else [0.0] * 16
 
 
+def _observed_levels(packets: list[Any]) -> list[float]:
+    if not packets:
+        return [0.0] * 16
+    return [sum(float(packet.fft[band]) for packet in packets) / len(packets) for band in range(16)]
+
+
+def _is_degenerate(levels: list[float]) -> bool:
+    return not any(level > 0 for level in levels) or all(level >= 255 for level in levels)
+
+
 def _rank_hypotheses(
-    observed: list[float], hypotheses: dict[str, list[float]]
+    observed: list[float], hypotheses: dict[str, tuple[list[float], list[float]]]
 ) -> list[dict[str, Any]]:
+    ranked = []
+    for name, (profile, levels) in hypotheses.items():
+        if _is_degenerate(levels):
+            ranked.append({"model": name, "status": "degenerate", "normalized_profile_mae": None})
+        else:
+            ranked.append(
+                {
+                    "model": name,
+                    "status": "ranked",
+                    "normalized_profile_mae": sum(
+                        abs(expected - actual) for expected, actual in zip(profile, observed)
+                    )
+                    / 16,
+                }
+            )
     return sorted(
-        [
-            {
-                "model": name,
-                "normalized_profile_mae": sum(abs(expected - actual) for expected, actual in zip(profile, observed)) / 16,
-            }
-            for name, profile in hypotheses.items()
-        ],
-        key=lambda item: item["normalized_profile_mae"],
+        ranked,
+        key=lambda item: (
+            item["status"] == "degenerate",
+            item["normalized_profile_mae"] if item["normalized_profile_mae"] is not None else math.inf,
+        ),
     )
+
+
+def _fit_input_scale(
+    samples: list[float],
+    sample_rate: int,
+    reference_packets: list[Any],
+    options: dict[str, Any],
+    base_input_gain: float,
+    base_pcm_to_fft_scale: float,
+) -> tuple[float, float, dict[str, Any]]:
+    target = _observed_levels(reference_packets)
+    if not reference_packets or _is_degenerate(target):
+        return base_input_gain, base_pcm_to_fft_scale, {
+            "status": "degenerate_reference",
+            "reason": "reference capture has all-zero or saturated FFT bands",
+        }
+
+    def evaluate(log_correction: float) -> tuple[float, float, float]:
+        correction = 10**log_correction
+        correction_root = math.sqrt(correction)
+        fitted_gain = base_input_gain * correction_root
+        fitted_pcm_scale = base_pcm_to_fft_scale * correction_root
+        levels = _fingerprint(
+            samples,
+            sample_rate,
+            **{
+                **options,
+                "input_gain": fitted_gain,
+                "pcm_to_fft_scale": fitted_pcm_scale,
+                "frame_stride": 4,
+                "normalize_output": False,
+            },
+        )
+        error = sum(abs(actual - expected) for actual, expected in zip(levels, target)) / 16
+        if _is_degenerate(levels):
+            error += 256
+        return error, fitted_gain, fitted_pcm_scale
+
+    coarse_logs = [index / 2 for index in range(-12, 13)]
+    coarse = [(evaluate(value)[0], value) for value in coarse_logs]
+    best_log = min(coarse, key=lambda result: result[0])[1]
+    fine_logs = [best_log - 0.5 + index * 0.05 for index in range(21)]
+    best_error, best_log = min((evaluate(value)[0], value) for value in fine_logs)
+    _, fitted_gain, fitted_pcm_scale = evaluate(best_log)
+    return fitted_gain, fitted_pcm_scale, {
+        "status": "fitted",
+        "objective": "mean_absolute_fft_output_value_error",
+        "mean_absolute_error": best_error,
+        "multiplicative_correction": 10**best_log,
+        "pcm_to_fft_scale": fitted_pcm_scale,
+        "input_gain": fitted_gain,
+        "note": "The shared correction is split equally in log space between input gain and PCM scale.",
+    }
 
 
 def compare_to_models(
@@ -201,10 +277,20 @@ def compare_to_models(
     reference_packets: list[Any],
     candidate_packets: list[Any],
     settings: dict[str, Any] | None = None,
+    *,
+    audio_start_seconds: float = 0,
+    audio_duration_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Compare capture band profiles against the configured DSP fingerprint."""
     settings = settings or {}
     sample_rate, samples = _read_wav(Path(audio_path))
+    start_sample = max(0, round(audio_start_seconds * sample_rate))
+    end_sample = (
+        len(samples)
+        if audio_duration_seconds is None
+        else min(len(samples), start_sample + max(0, round(audio_duration_seconds * sample_rate)))
+    )
+    samples = samples[start_sample:end_sample]
     configured_rate = settings.get("sample_rate_hz", sample_rate)
     if not isinstance(configured_rate, int) or configured_rate <= 0:
         configured_rate = sample_rate
@@ -256,42 +342,37 @@ def compare_to_models(
         "blackmanharris",
     )
 
-    def fingerprint(**overrides: Any) -> list[float]:
-        options = {
-            "fft_size": configured_fft_size,
-            "interpreted_rate": configured_rate,
-            "frequency_distribution": frequency_distribution,
-            "use_input_filter": use_input_filter,
-            "pink_profile": pink_profile,
-            "window_correction": window_correction,
-            "average_mode": average_mode,
-            "input_gain": input_gain,
-            "scaling": scaling_mode,
-            "agc_post_gain": agc_post_gain if agc_enabled else 1.0,
-            "pcm_to_fft_scale": pcm_to_fft_scale,
-        }
-        options.update(overrides)
-        return _fingerprint(samples, sample_rate, **options)
+    if not math.isfinite(pcm_to_fft_scale) or pcm_to_fft_scale <= 0:
+        pcm_to_fft_scale = 1.0
+    options = {
+        "fft_size": configured_fft_size,
+        "interpreted_rate": configured_rate,
+        "frequency_distribution": frequency_distribution,
+        "use_input_filter": use_input_filter,
+        "pink_profile": pink_profile,
+        "window_correction": window_correction,
+        "average_mode": average_mode,
+        "scaling": scaling_mode,
+        "agc_post_gain": agc_post_gain if agc_enabled else 1.0,
+    }
+    fitted_gain, fitted_pcm_scale, scale_fit = _fit_input_scale(
+        samples, sample_rate, reference_packets, options, input_gain, pcm_to_fft_scale
+    )
+    options.update(input_gain=fitted_gain, pcm_to_fft_scale=fitted_pcm_scale)
 
-    reference_model = fingerprint()
+    def fingerprint_raw(**overrides: Any) -> list[float]:
+        hypothesis_options = {**options, **overrides}
+        return _fingerprint(samples, sample_rate, normalize_output=False, **hypothesis_options)
+
+    def fingerprint(**overrides: Any) -> tuple[list[float], list[float]]:
+        levels = fingerprint_raw(**overrides)
+        return _normalize_profile(levels), levels
+
     wrong_rate = 18_000 if configured_rate != 18_000 else 22_050
     wrong_fft_size = 256 if configured_fft_size != 256 else 1024
     hypotheses = {
-        "reference_fingerprint": reference_model,
-        "linear_band_split": _fingerprint(
-            samples,
-            sample_rate,
-            fft_size=configured_fft_size,
-            mapping="linear_band_split",
-            interpreted_rate=configured_rate,
-            pink_profile=pink_profile,
-            window_correction=window_correction,
-            average_mode=average_mode,
-            input_gain=input_gain,
-            scaling=scaling_mode,
-            agc_post_gain=agc_post_gain if agc_enabled else 1.0,
-            pcm_to_fft_scale=pcm_to_fft_scale,
-        ),
+        "reference_fingerprint": fingerprint(),
+        "linear_band_split": fingerprint(mapping="linear_band_split"),
         f"wrong_sample_rate_{wrong_rate}_hz": fingerprint(interpreted_rate=wrong_rate),
         f"wrong_fft_size_{wrong_fft_size}": fingerprint(fft_size=wrong_fft_size),
         "no_pink_correction": fingerprint(pink_correction=False),
@@ -305,12 +386,16 @@ def compare_to_models(
         if mutant_scale != scaling_mode:
             hypotheses[mutant_name] = fingerprint(scaling=mutant_scale)
 
-    reference_ranking = _rank_hypotheses(_observed_profile(reference_packets), hypotheses)
-    candidate_ranking = _rank_hypotheses(_observed_profile(candidate_packets), hypotheses)
-    reference_best = reference_ranking[0]["model"] if reference_ranking else None
-    reference_tied = len(reference_ranking) > 1 and math.isclose(
-        reference_ranking[0]["normalized_profile_mae"],
-        reference_ranking[1]["normalized_profile_mae"],
+    reference_levels = _observed_levels(reference_packets)
+    candidate_levels = _observed_levels(candidate_packets)
+    reference_ranking = _rank_hypotheses(_normalize_profile(reference_levels), hypotheses)
+    candidate_ranking = _rank_hypotheses(_normalize_profile(candidate_levels), hypotheses)
+    valid_reference_ranking = [item for item in reference_ranking if item["status"] == "ranked"]
+    valid_candidate_ranking = [item for item in candidate_ranking if item["status"] == "ranked"]
+    reference_best = valid_reference_ranking[0]["model"] if valid_reference_ranking else None
+    reference_tied = len(valid_reference_ranking) > 1 and math.isclose(
+        valid_reference_ranking[0]["normalized_profile_mae"],
+        valid_reference_ranking[1]["normalized_profile_mae"],
         abs_tol=1e-6,
     )
     unmodeled_settings = []
@@ -329,7 +414,6 @@ def compare_to_models(
         "dynamics_limiter",
         "fastpath",
         "sliding_window",
-        "pcm_to_fft_scale",
     ):
         if key not in settings:
             unmodeled_settings.append(key)
@@ -348,16 +432,37 @@ def compare_to_models(
     if not pink_profile_known:
         unmodeled_settings.append("unknown pink profile")
     settings_modelable = not unmodeled_settings
+    reference_degenerate = _is_degenerate(reference_levels)
     trustworthy = (
         settings_modelable
+        and not reference_degenerate
         and reference_best == "reference_fingerprint"
         and not reference_tied
     )
-    candidate_tied = len(candidate_ranking) > 1 and math.isclose(
-        candidate_ranking[0]["normalized_profile_mae"],
-        candidate_ranking[1]["normalized_profile_mae"],
+    candidate_degenerate = _is_degenerate(candidate_levels)
+    candidate_tied = len(valid_candidate_ranking) > 1 and math.isclose(
+        valid_candidate_ranking[0]["normalized_profile_mae"],
+        valid_candidate_ranking[1]["normalized_profile_mae"],
         abs_tol=1e-6,
     )
+    if reference_degenerate:
+        reference_reason = "reference capture does not validate model assumptions: FFT profile is degenerate (all-zero or saturated)"
+    elif not valid_reference_ranking:
+        reference_reason = "reference capture does not validate model assumptions: all model fingerprints are degenerate (all-zero or saturated)"
+    elif reference_tied:
+        reference_reason = "reference capture does not validate model assumptions: ranking is tied between model hypotheses"
+    elif reference_best != "reference_fingerprint":
+        reference_reason = (
+            f"reference capture does not validate model assumptions: best matches {reference_best}, "
+            "not reference_fingerprint"
+        )
+    elif unmodeled_settings:
+        reference_reason = (
+            "reference capture does not validate the model assumptions; unmodeled settings: "
+            + ", ".join(unmodeled_settings)
+        )
+    else:
+        reference_reason = None
     return {
         "audio_sample_rate_hz": sample_rate,
         "reference_settings": settings,
@@ -369,31 +474,30 @@ def compare_to_models(
         "reference_capture_ranking": {
             "best_match": reference_best,
             "ranking_is_trustworthy": trustworthy,
+            "status": "degenerate" if reference_degenerate or not valid_reference_ranking else "ranked",
             "ranked_hypotheses": reference_ranking,
-            "reason": (
-                None
-                if trustworthy
-                else "reference capture does not validate the model assumptions"
-            ),
+            "reason": None if trustworthy else reference_reason,
         },
         "candidate_capture_ranking": {
             "best_match": (
-                candidate_ranking[0]["model"]
-                if trustworthy and candidate_ranking and not candidate_tied
+                valid_candidate_ranking[0]["model"]
+                if trustworthy and valid_candidate_ranking and not candidate_tied and not candidate_degenerate
                 else None
             ),
-            "ambiguous_best_match": candidate_tied,
+            "ambiguous_best_match": candidate_tied and not candidate_degenerate,
+            "status": "degenerate" if candidate_degenerate else "ranked",
             "ranked_hypotheses": candidate_ranking,
             "ranking_is_trustworthy": trustworthy,
         },
+        "input_scale_fit": scale_fit,
         "configuration_known": {
             "pink_profile": pink_profile_known,
             "fft_scaling": scaling_setting in scaling_modes,
             "average_mode": "average_mode" in settings,
             "window_correction": window_correction,
             "fft_window_supported": window_supported,
-            "input_gain": input_gain,
-            "pcm_to_fft_scale": pcm_to_fft_scale,
+            "input_gain": fitted_gain,
+            "pcm_to_fft_scale": fitted_pcm_scale,
             "agc_fft_gain": "agc_fft_gain" in settings if agc_enabled else None,
             "unmodeled_settings": unmodeled_settings,
         },

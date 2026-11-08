@@ -358,6 +358,7 @@ def _band_shape_level(
                 sum(ratio_errors) / len(ratio_errors) if ratio_errors else None
             ),
             "normalized_profile_mae": sum(profile_errors) / len(profile_errors) if profile_errors else None,
+            "total_variation": sum(profile_errors) / 2 if profile_errors else None,
             "temporal_correlation_applicable": dynamic_stimulus,
             "level_check": "not_calibrated",
             "interpretation": "shape separates temporal/profile agreement from overall gain or input-level differences",
@@ -437,9 +438,13 @@ def _diagnostics(
     failed_bands = [field for field in failed_fields if field.startswith("fft.")]
     stimulus = case.get("stimulus", {})
     stimulus_type = stimulus.get("type") if isinstance(stimulus, dict) else None
-    if failed_bands or (
-        stimulus_type == "logarithmic_sweep" and "dominant_frequency" in failed_fields
-    ):
+    shape_failed = any(failure.get("field") == "shape" for failure in failures)
+    if failed_bands or shape_failed or stimulus_type in {
+        "tone",
+        "white_noise",
+        "pink_noise",
+        "logarithmic_sweep",
+    }:
         if stimulus_type == "tone" and isinstance(stimulus.get("frequency_hz"), (int, float)):
             sample_rate = reference_settings.get("sample_rate_hz", 22_050)
             fft_size = reference_settings.get("fft_size", 512)
@@ -510,7 +515,11 @@ def _diagnostics(
             hints.append(
                 {
                     "category": "spectral_mapping",
-                    "evidence": f"threshold failures in {', '.join(sorted(failed_bands))}",
+                    "evidence": (
+                        f"threshold failures in {', '.join(sorted(failed_bands))}"
+                        if failed_bands
+                        else "spectral shape threshold failure"
+                    ),
                     "hint": "Compare the failing band profile; check sample rate, FFT size/window, frequency distribution and scaling.",
                 }
             )
@@ -763,6 +772,20 @@ def compare(reference_path: str | Path, candidate_path: str | Path, case_path: s
                     reference_window,
                     candidate_window,
                     reference_artifact["metadata"].get("settings", {}),
+                    audio_start_seconds=(
+                        window["requested_start_ms"] / 1000
+                        if "requested_start_ms" in window
+                        else float(stimulus.get("warmup_seconds", 0))
+                    ),
+                    audio_duration_seconds=(
+                        max(0, (window["requested_end_ms"] - window["requested_start_ms"]) / 1000)
+                        if "requested_start_ms" in window and "requested_end_ms" in window
+                        else (
+                            float(stimulus["measurement_seconds"])
+                            if isinstance(stimulus.get("measurement_seconds"), (int, float))
+                            else None
+                        )
+                    ),
                 )
             except (OSError, TypeError, ValueError, wave.Error) as error:
                 reference_model = {"error": str(error)}

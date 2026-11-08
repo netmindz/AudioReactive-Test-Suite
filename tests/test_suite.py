@@ -121,12 +121,12 @@ class StimulusTests(unittest.TestCase):
     def test_reference_model_reports_ranked_profile_hypotheses(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             create_sample_set(directory)
-            audio = Path(directory) / "tone_688hz.wav"
+            audio = Path(directory) / "pink_noise_seed_20261108.wav"
             sample_rate, samples = _read_wav(audio)
-            profile = _fingerprint(samples, sample_rate, pink_correction=False)
+            profile = _fingerprint(samples, sample_rate, pink_correction=False, pcm_to_fft_scale=64)
             fft = tuple(round(value * 255) for value in profile)
             candidate_packet = decode_packet(audio_sync_packet(1, "10.0.0.2:11988", fft=fft))
-            reference_profile = _fingerprint(samples, sample_rate)
+            reference_profile = _fingerprint(samples, sample_rate, pcm_to_fft_scale=64)
             reference_packet = decode_packet(
                 audio_sync_packet(
                     1,
@@ -141,6 +141,7 @@ class StimulusTests(unittest.TestCase):
                 "fft_scaling": "sqrt",
                 "pink_index": 0,
                 "average_mode": "mean",
+                "pcm_to_fft_scale": 64,
             }
 
             result = compare_to_models(audio, [reference_packet], [candidate_packet], settings)
@@ -158,12 +159,35 @@ class StimulusTests(unittest.TestCase):
         )
         self.assertIn("diagnostic approximation", result["scope"])
 
+    def test_reference_model_fits_input_scale_and_gain(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            create_sample_set(directory)
+            audio = Path(directory) / "pink_noise_seed_20261108.wav"
+            sample_rate, samples = _read_wav(audio)
+            reference_levels = _fingerprint(
+                samples, sample_rate, pcm_to_fft_scale=64, normalize_output=False
+            )
+            fft = tuple(round(value) for value in reference_levels)
+            reference_packet = decode_packet(audio_sync_packet(1, "10.0.0.1:11988", fft=fft))
+            result = compare_to_models(
+                audio,
+                [reference_packet],
+                [reference_packet],
+                {"fft_size": 512, "fft_scaling": "sqrt", "pcm_to_fft_scale": 1},
+            )
+
+        self.assertEqual(result["input_scale_fit"]["status"], "fitted")
+        self.assertGreater(result["input_scale_fit"]["pcm_to_fft_scale"], 1)
+        self.assertGreater(result["input_scale_fit"]["input_gain"], 1)
+        self.assertNotEqual(result["reference_capture_ranking"]["status"], "degenerate")
+        self.assertNotIn("pcm_to_fft_scale", result["configuration_known"]["unmodeled_settings"])
+
     def test_reference_model_gates_candidate_ranking_when_baseline_disagrees(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             create_sample_set(directory)
             audio = Path(directory) / "tone_688hz.wav"
             packets = [
-                decode_packet(audio_sync_packet(1 + index, "10.0.0.1:11988"))
+                decode_packet(audio_sync_packet(1 + index, "10.0.0.1:11988", fft=(0,) * 16))
                 for index in range(3)
             ]
             result = compare_to_models(
@@ -176,6 +200,8 @@ class StimulusTests(unittest.TestCase):
         self.assertFalse(result["reference_capture_ranking"]["ranking_is_trustworthy"])
         self.assertIsNone(result["candidate_capture_ranking"]["best_match"])
         self.assertIn("does not validate", result["reference_capture_ranking"]["reason"])
+        self.assertIn("degenerate", result["reference_capture_ranking"]["reason"])
+        self.assertEqual(result["reference_capture_ranking"]["status"], "degenerate")
 
     def test_documented_square_root_scaling_example_rounds_to_byte_79(self) -> None:
         self.assertEqual(_scale_fft_value(106.25, 0, 3), 79)
@@ -419,12 +445,15 @@ class ComparisonTests(unittest.TestCase):
         write_case(
             self.case,
             stimulus={"type": "tone", "frequency_hz": 688},
-            thresholds={"fft.6": {"mae": 0}},
+            thresholds={},
+            shape_thresholds={"total_variation": 0.1},
         )
 
         report, exit_code = compare(self.reference, self.candidate, self.case)
 
         self.assertEqual(exit_code, EXIT_THRESHOLD_FAILURE)
+        self.assertEqual(report["threshold_failures"][0]["field"], "shape")
+        self.assertEqual(report["scorecard"]["total_variation"], 1.0)
         tone_diagnostic = next(item for item in report["diagnostics"] if item["category"] == "tone_band_mapping")
         self.assertIn("expected band 6", tone_diagnostic["evidence"])
         self.assertIn("6/8", tone_diagnostic["evidence"])

@@ -24,6 +24,6 @@
     "dominant_frequency": {"mae": 100}
   },
   "shape_thresholds": {
-    "normalized_profile_mae": 0.15
+    "total_variation": 0.15
   }
 }
