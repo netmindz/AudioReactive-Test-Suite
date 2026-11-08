@@ -18,6 +18,31 @@ WLED line-in and to the candidate's supported input. Feature-based senders may
 need their own upstream playback path. Verify routing and levels rather than
 assuming that identical source audio yields identical physical input.
 
+## Reference and settings contract
+
+Make the fast path a native, offline reference adapter that feeds a WAV through
+the selected, pinned MoonModules DSP and emits the same logical fields as the
+hardware reference. Investigate isolating and building the actual C++ DSP with
+its pinned FFT dependency and explicit platform shims; do not assume that it
+already builds natively. Pin source revision, compiler, FFT library, target
+options and numerical settings. Establish reproducibility within a pinned
+environment and specify tolerances for cross-platform floating point. Validate
+the native reference against hardware across the test matrix, including
+input scaling, timing and state; treat discrepancies as reference limitations,
+not automatic candidate failures. Saved hardware captures remain useful when
+native porting is infeasible and real hardware remains the final ground truth.
+
+The per-sender manifest must state sample rate, FFT size and window, averaging
+mode, frequency distribution, mic filter and quality, pink profile, FFT
+scaling, gain/input level, AGC mode, squelch, peak bin/threshold and dynamics
+limiter, as applicable to the selected revision. Reference and candidate
+adapters report actual settings and map equivalent names and units.
+Compare settings before scoring: required unknown or mismatched settings make
+the affected cases inconclusive. An explicit, documented equivalence or
+calibration can make differing physical input paths comparable; it must not
+silently mask a processing discrepancy. Some senders may lack settings; record
+that limitation rather than asserting equivalence.
+
 ## Stimuli and execution
 
 Define versioned cases for silence, low/mid/high and boundary-frequency tones,
@@ -30,6 +55,27 @@ Pink-noise test audio is distinct from the reference's pink-noise correction.
 Start capture before playback and stop it after the trailing interval. Playback
 or adapter failures must invalidate the case. Where playback is manual, record
 the timing source and any uncertainty; do not silently assume success.
+
+### Targeted test catalogue
+
+Use the pinned [DSP reference](REFERENCE_DSP.md) and each configuration to
+derive expected outcomes. Keep reference measurements, thresholds and input
+levels with every case; the hints below are hypotheses supported by measured
+differences, not diagnoses of hidden implementation details.
+
+| Case | Check and example hint |
+| --- | --- |
+| Tone at each band center and around edges | Compare the band-response pattern, including overlapping ranges and window leakage. Unexpected energy in adjacent or distant bands suggests bin mapping, FFT rate/size or frequency distribution. |
+| Frequency sweep and two-tone | Compare channel transitions and dominant frequency; misplaced transitions suggest sample-rate, bin-boundary or FFT errors. |
+| Seeded pink and white noise under selected profiles | Compare per-band shapes against the same reference profile; a frequency-dependent bias suggests pink correction, microphone profile or scaling. Do not assume pink input necessarily yields a flat output. |
+| Silence and below/above-squelch levels | Compare volume, FFT and major-peak behavior after settling. Residual energy suggests gating, gain or noise-floor differences; verify the selected reference's silence behavior rather than assuming an unconditional frequency value. |
+| Level steps and amplitude modulation | Compare attack/release curves and AGC settling for each preset. Excessive overshoot or slow recovery suggests gain, AGC or dynamics-limiter differences. |
+| Click trains at multiple intervals, including around hold-off | Compare peak events with a tolerance. Extra or missed events suggest bin/threshold, hold-off or packet peak handling; a regular musical beat is not by itself the oracle. |
+
+Each failed case should include case ID, measured reference/candidate values,
+threshold, relevant settings and ranked possible causes with the evidence that
+triggered each hint. Avoid hard-coded claims such as a fixed band for 1 kHz
+independent of FFT settings.
 
 ## UDP capture and protocol
 
@@ -45,9 +91,10 @@ finite numeric values. Decode the little-endian volume floats at offsets 8 and
 12, peak flag at 16, 16 FFT bytes at 18, and magnitude and major-peak floats at
 36 and 40. Preserve the remaining bytes; pressure, frame counter and
 zero-crossing extensions are not guaranteed to be meaningful for all
-implementations. Reject or separately account for unsupported versions and
-malformed packets. Legacy v1 support requires a separately specified target
-ABI and is outside the initial scope.
+implementations. MoonModules defines a frame counter at offset 17, but other
+v2 senders may reserve or not advance it. Reject or separately account for
+unsupported versions and malformed packets. Legacy v1 support requires a
+separately specified target ABI and is outside the initial scope.
 
 The layout is based on [WLED-sync's packet definition](https://github.com/netmindz/WLED-sync/blob/f7d9c154f59e87560ab376fb9946cec6cb10a8fe/WLED-sync.h#L12-L29)
 and the [existing comparison parser](https://github.com/netmindz/SR-WLED-audio-server-win/blob/8c02afe6db6c2df9eaf21748cbdd9cce8a5c9fd7/tools/compare_wled.py).
@@ -73,8 +120,9 @@ and the [existing comparison parser](https://github.com/netmindz/SR-WLED-audio-s
   missed and extra events. Define event extraction and account for repeated
   peak flags and packet loss; a peak flag is not necessarily a musical beat.
 - Report packet rate, arrival jitter, malformed and missing data separately
-  from audio metrics. Estimate sequence loss only if a sender is known to
-  implement the frame-counter extension.
+  from audio metrics. Estimate sequence loss only when counter semantics are
+  known and observed to advance; handle wraparound, duplicates, reordering and
+  resets. A nonzero byte alone is insufficient evidence of a working counter.
 
 ## Results and verdicts
 
@@ -91,6 +139,25 @@ AGC mode, noise gate, microphone/pink-correction profile, audio routing,
 output levels and timing. Document clipping and level calibration. Do not
 silently normalize away gain differences or infer hardware settings from
 packets. Saved reference captures are only valid for the recorded setup.
+
+## Agent workflow and existing tools
+
+Provide a single documented command, once implemented, that selects a candidate
+adapter and profile, runs the offline matrix and writes a JSON report. An agent
+reads the requirements and pinned DSP reference, runs that command, inspects
+invalid cases before failed cases, follows evidence-backed hints to change the
+candidate, and reruns the same cases and full matrix. It must not relax
+thresholds or silently change the reference settings to obtain a pass. Include
+the command, exit-code contract, artifacts and iteration instructions in the
+future harness documentation; no command is specified as available today.
+
+Use the existing [comparison parser and plots](https://github.com/netmindz/SR-WLED-audio-server-win/blob/8c02afe6db6c2df9eaf21748cbdd9cce8a5c9fd7/tools/compare_wled.py)
+and [signal matrix](https://github.com/netmindz/SR-WLED-audio-server-win/blob/8c02afe6db6c2df9eaf21748cbdd9cce8a5c9fd7/tools/run_test_matrix.py)
+as a starting point, subject to their license and dependency requirements.
+Before reuse, correct the loose header check, explicit multicast joining,
+no-traffic timeout and playback failure handling; add quantitative comparisons
+and adapter boundaries rather than assuming the existing Linux runner is
+portable. Do not copy code without complying with its license.
 
 ## Verification
 

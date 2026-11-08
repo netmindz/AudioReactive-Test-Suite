@@ -42,10 +42,12 @@ interface.
 ## Scope
 
 The initial target is Audio Sync v2 output from one reference and one candidate.
-Comparison against a real WLED device is the reference workflow; saved reference
-captures make repeatable offline and CI comparisons possible when hardware is
-unavailable. The harness assesses observable outputs, not proof that the
-candidate internally implements the same algorithm.
+Real WLED hardware is the final ground truth. A deterministic offline software
+reference and saved reference captures should enable fast iteration and CI
+without hardware; their equivalence to the selected hardware must be validated.
+The harness assesses observable outputs, not proof that the candidate internally
+implements the same algorithm. See [REFERENCE_DSP.md](REFERENCE_DSP.md) for
+the version-specific reference behavior and its configuration dependencies.
 
 ## Functional requirements
 
@@ -76,6 +78,18 @@ candidate internally implements the same algorithm.
 9. **Validity:** Missing packets, failed playback, ambiguous source identity,
    insufficient overlap or unreliable alignment must not be reported as a
    successful comparison.
+10. **Domain diagnostics:** Use targeted tests to distinguish likely FFT
+    frequency mapping, pink correction, microphone profile, scaling, AGC,
+    squelch, limiter and peak-detection mistakes. Report evidence and actionable,
+    qualified hints, not just a score.
+11. **Comparable configurations:** Require the same relevant reference and
+    candidate settings or an explicitly documented equivalent. Incompatible
+    or unknown required settings make the affected comparison inconclusive;
+    no silent substitution is allowed.
+12. **Software reference and agent loop:** Provide a reproducible offline
+    reference path, subject to hardware validation, and a one-command test
+    workflow with structured output and instructions for an agent to diagnose,
+    change and rerun a candidate.
 
 ## Acceptance criteria
 
@@ -89,10 +103,19 @@ candidate internally implements the same algorithm.
   metrics and verdict.
 - A documented hardware workflow records sufficient settings and calibration
   details to interpret results against a particular reference firmware.
+- Fixtures with deliberately wrong band mapping, correction, gain/gating or
+  peak timing yield relevant diagnostic hints with the measured evidence.
+- Unknown or mismatched required settings do not yield a conformance pass.
+- Repeating an offline case with identical inputs and pinned reference settings
+  produces reproducible results; hardware comparisons quantify any deviation.
 
 ## Open decisions
 
 - Which WLED firmware revision, hardware and settings define the first reference?
+- Which MoonModules settings define the canonical reference profile, and how
+  should candidates express equivalent settings they do not expose directly?
+- Is a faithful native build of the selected reference feasible, and what
+  numerical tolerance is required across platforms?
 - Which platforms must support automated playback initially?
 - Which CI environments can access hardware, and which must use saved captures?
 - What baseline measurements justify initial thresholds for each configuration?
