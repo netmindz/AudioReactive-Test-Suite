@@ -25,10 +25,19 @@ This document describes a proposed harness; it is not an implemented test suite.
   accepting a WAV file. [WLED Audio Sender](https://github.com/netmindz/WLED-Audio-Sender)
   captures mobile microphone or Android internal audio. The
   [Music Assistant WLED audio sync branch](https://github.com/netmindz/music-assistant-server/tree/feature/wled-audio-sync)
-  converts extracted features into packets. The inspected
-  [WLED-App](https://github.com/Moustachauve/WLED-App) sources did not establish
-  that it currently sends audio-sync data. These projects should not be assumed
-  to share an audio-file input or automation interface.
+  converts extracted features into packets.
+- [WLED-App PR #318](https://github.com/Moustachauve/WLED-App/pull/318) is an
+  open draft that adds AGC modes and squelch control to Sound Sync. At the
+  [reviewed PR revision](https://github.com/Moustachauve/WLED-App/blob/d9efec714e0b28debcb4977d381c099742661091/shared/src/commonMain/kotlin/ca/cgagnier/wlednativeandroid/service/soundsync/dsp/SoundSyncProcessor.kt),
+  shared processing applies filtering, gain, FFT and peak detection to PCM.
+  Its [Android](https://github.com/Moustachauve/WLED-App/blob/d9efec714e0b28debcb4977d381c099742661091/app/src/main/java/ca/cgagnier/wlednativeandroid/service/soundsync/SoundSyncManager.kt)
+  and [iOS](https://github.com/Moustachauve/WLED-App/blob/d9efec714e0b28debcb4977d381c099742661091/iosApp/wled/Service/SoundSync/SoundSyncManager.swift)
+  managers capture microphone audio and send Sound Sync UDP packets. This is
+  a relevant candidate for comparison, not evidence that the draft has merged
+  or that its processing matches WLED.
+
+These projects should not be assumed to share an audio-file input or automation
+interface.
 
 ## Scope
 
