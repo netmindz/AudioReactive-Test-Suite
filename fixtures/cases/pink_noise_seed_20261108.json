@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "id": "pink-noise-seed-20261108",
+  "stimulus": {
+    "audio_file": "../audio/pink_noise_seed_20261108.wav",
+    "type": "pink_noise",
+    "seed": 20261108,
+    "warmup_seconds": 0.5,
+    "measurement_seconds": 3
+  },
+  "timing": {
+    "capture_duration_seconds": 5
+  },
+  "required_settings": ["sample_rate_hz", "fft_size", "fft_window", "pink_index", "fft_scaling"],
+  "alignment": {
+    "mode": "auto",
+    "search_range_ms": 1000,
+    "step_ms": 5,
+    "maximum_pair_distance_ms": 30
+  },
+  "minimum_coverage": 0.8,
+  "thresholds": {},
+  "shape_thresholds": {
+    "normalized_profile_mae": 0.15
+  }
+}

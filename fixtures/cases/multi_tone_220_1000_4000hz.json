@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "id": "multi-tone-220-1000-4000hz",
+  "stimulus": {
+    "audio_file": "../audio/multi_tone_220_1000_4000hz.wav",
+    "type": "multi_tone",
+    "frequencies_hz": [220, 1000, 4000],
+    "warmup_seconds": 0.5,
+    "measurement_seconds": 2.5
+  },
+  "timing": {
+    "capture_duration_seconds": 5
+  },
+  "required_settings": ["sample_rate_hz", "fft_size", "fft_window", "fft_scaling"],
+  "alignment": {
+    "mode": "auto",
+    "search_range_ms": 1000,
+    "step_ms": 5,
+    "maximum_pair_distance_ms": 30
+  },
+  "minimum_coverage": 0.8,
+  "strong_signal_magnitude": 1,
+  "thresholds": {
+    "dominant_frequency": {"mae": 100}
+  },
+  "shape_thresholds": {
+    "normalized_profile_mae": 0.15
+  }
+}

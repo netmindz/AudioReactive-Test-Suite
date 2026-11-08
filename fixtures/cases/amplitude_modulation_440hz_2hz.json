@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "id": "amplitude-modulation-440hz-2hz",
+  "stimulus": {
+    "audio_file": "../audio/amplitude_modulated_440hz_2hz.wav",
+    "type": "amplitude_modulation",
+    "carrier_hz": 440,
+    "modulation_hz": 2,
+    "warmup_seconds": 0.5,
+    "measurement_seconds": 4
+  },
+  "timing": {
+    "capture_duration_seconds": 6
+  },
+  "required_settings": ["sample_rate_hz", "fft_size", "fft_window", "agc_mode"],
+  "alignment": {
+    "mode": "auto",
+    "search_range_ms": 1000,
+    "step_ms": 5,
+    "maximum_pair_distance_ms": 30
+  },
+  "minimum_coverage": 0.8,
+  "thresholds": {},
+  "shape_thresholds": {
+    "normalized_profile_mae": 0.15,
+    "minimum_shape_correlation": 0.7
+  }
+}

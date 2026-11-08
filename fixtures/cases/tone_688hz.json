@@ -18,71 +18,19 @@
     "fft_scaling"
   ],
   "alignment": {
-    "candidate_offset_ms": 0,
+    "mode": "auto",
+    "search_range_ms": 1000,
+    "step_ms": 5,
     "maximum_pair_distance_ms": 30
   },
   "minimum_coverage": 0.8,
   "strong_signal_magnitude": 1,
   "thresholds": {
-    "volume_raw": {
-      "mae": 0.1
-    },
-    "volume_smoothed": {
-      "mae": 0.1
-    },
-    "magnitude": {
-      "mae": 5
-    },
     "dominant_frequency": {
       "mae": 50
-    },
-    "fft.0": {
-      "mae": 15
-    },
-    "fft.1": {
-      "mae": 15
-    },
-    "fft.2": {
-      "mae": 15
-    },
-    "fft.3": {
-      "mae": 15
-    },
-    "fft.4": {
-      "mae": 15
-    },
-    "fft.5": {
-      "mae": 15
-    },
-    "fft.6": {
-      "mae": 15
-    },
-    "fft.7": {
-      "mae": 15
-    },
-    "fft.8": {
-      "mae": 15
-    },
-    "fft.9": {
-      "mae": 15
-    },
-    "fft.10": {
-      "mae": 15
-    },
-    "fft.11": {
-      "mae": 15
-    },
-    "fft.12": {
-      "mae": 15
-    },
-    "fft.13": {
-      "mae": 15
-    },
-    "fft.14": {
-      "mae": 15
-    },
-    "fft.15": {
-      "mae": 15
     }
+  },
+  "shape_thresholds": {
+    "normalized_profile_mae": 0.15
   }
 }

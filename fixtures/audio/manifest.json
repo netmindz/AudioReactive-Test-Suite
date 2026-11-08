@@ -106,6 +106,20 @@
       "amplitude": 0.7
     },
     {
+      "id": "level_steps_440hz",
+      "filename": "level_steps_440hz.wav",
+      "duration_seconds": 5,
+      "type": "level_steps",
+      "carrier_hz": 440,
+      "levels": [
+        0.1,
+        0.25,
+        0.45,
+        0.7,
+        0.9
+      ]
+    },
+    {
       "id": "white_noise_seed_20261108",
       "filename": "white_noise_seed_20261108.wav",
       "duration_seconds": 4,

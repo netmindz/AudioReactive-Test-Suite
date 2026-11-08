@@ -40,7 +40,7 @@ python3 -m audioreactive_suite capture \
 Usable 22,050 Hz mono PCM WAV fixtures are committed in
 [`fixtures/audio`](fixtures/audio). They include silence; low-to-high single
 tones; a multi-tone signal; a logarithmic sweep; a click train; amplitude
-modulation; and deterministic white and pink noise. Their exact duration,
+modulation; stepped levels; and deterministic white and pink noise. Their exact duration,
 frequency, amplitude and noise seeds are in
 [`fixtures/audio/manifest.json`](fixtures/audio/manifest.json).
 
@@ -74,5 +74,35 @@ python3 -m audioreactive_suite run \
 The supplied tone, click and sweep cases are starting profiles, not universal
 WLED tolerances. Calibrate thresholds against repeated captures for the pinned
 firmware, input routing and settings before treating a result as conformance.
-Unknown or mismatched required settings, unsuccessful playback, mixed sources,
-or insufficient overlap result in `inconclusive`, never a pass.
+Cases estimate candidate latency using envelope correlation when their
+`alignment.mode` is `auto`; the report includes the signed offset, confidence,
+search range and ambiguity decision. An ambiguous estimate makes the result
+inconclusive. The `stimulus.warmup_seconds` and `measurement_seconds` fields
+select the score window relative to the recorded playback start, not the first
+received packet. The offset search range is case-configurable; supplied cases
+search ±1 second. A calibration preamble is not injected, to keep each WAV's
+declared stimulus unchanged.
+
+The report separates per-band temporal shape correlation and normalized profile
+error from the ratio of candidate to reference output byte values; this ratio is
+not physical dB. Shape thresholds can be configured under `shape_thresholds`.
+Level thresholds are optional under `level_thresholds`; without calibration, the
+level check is reported as `not_calibrated` and does not affect the verdict.
+Temporal correlations are reported only for dynamic stimuli (modulation, steps,
+sweep and clicks).
+
+When a case references an audio fixture, the report ranks DSP fingerprint
+hypotheses for both the hardware reference and candidate. The candidate ranking
+is withheld unless the reference capture uniquely validates the configured
+fingerprint. The model includes the documented GEQ maps, bin averaging, divide
+by 16, profile/downscale/gain stages and MoonModules scaling transfer functions,
+including channel-dependent factors. It remains a diagnostic approximation: it
+does not model input filtering, AGC dynamics, limiter state, or fast-path
+smoothing. Behavior mutants are not ranked because their scores are not
+validated against the reference capture.
+
+Cases cover tone, sweep, clicks, multi-tone, amplitude modulation, stepped levels,
+and seeded white/pink noise. Unknown or mismatched required settings,
+unsuccessful playback, mixed sources, ambiguous latency, or insufficient overlap
+result in `inconclusive`, never a pass. Thresholds still require calibration from
+maintainer hardware captures for a pinned profile.
