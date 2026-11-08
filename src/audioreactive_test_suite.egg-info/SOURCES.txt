@@ -6,6 +6,7 @@ src/audioreactive_suite/capture.py
 src/audioreactive_suite/cli.py
 src/audioreactive_suite/compare.py
 src/audioreactive_suite/execution.py
+src/audioreactive_suite/model.py
 src/audioreactive_suite/packet.py
 src/audioreactive_suite/reporting.py
 src/audioreactive_suite/stimuli.py

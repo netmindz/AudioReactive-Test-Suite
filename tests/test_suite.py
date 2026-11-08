@@ -1,6 +1,7 @@
 import base64
 import json
 import math
+import random
 import socket
 import struct
 import tempfile
@@ -14,6 +15,7 @@ from audioreactive_suite.cli import main
 from audioreactive_suite.compare import EXIT_INCONCLUSIVE, EXIT_PASS, EXIT_THRESHOLD_FAILURE, compare
 from audioreactive_suite.capture import capture_udp
 from audioreactive_suite.execution import run_case
+from audioreactive_suite.model import compare_to_models
 from audioreactive_suite.packet import decode_packet
 from audioreactive_suite.stimuli import SAMPLE_RATE_HZ, create_sample_set
 
@@ -106,7 +108,7 @@ class StimulusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             manifest_path = create_sample_set(directory)
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            self.assertEqual(len(manifest["files"]), 14)
+            self.assertEqual(len(manifest["files"]), 15)
             self.assertEqual(manifest["sample_rate_hz"], SAMPLE_RATE_HZ)
             self.assertEqual(manifest["files"][-1]["seed"], 20261108)
             with wave.open(str(Path(directory) / "sweep_80_8000hz.wav")) as audio:
@@ -114,6 +116,18 @@ class StimulusTests(unittest.TestCase):
                 self.assertEqual(audio.getsampwidth(), 2)
                 self.assertEqual(audio.getframerate(), SAMPLE_RATE_HZ)
                 self.assertEqual(audio.getnframes(), 5 * SAMPLE_RATE_HZ)
+
+    def test_reference_model_reports_ranked_profile_hypotheses(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = create_sample_set(directory)
+            audio = Path(directory) / "tone_688hz.wav"
+            packet = decode_packet(audio_sync_packet(1, "10.0.0.1:11988"))
+
+            result = compare_to_models(audio, [packet])
+
+        self.assertIn("linear_band_split", [item["model"] for item in result["ranked_hypotheses"]])
+        self.assertIn("wrong_fft_size_256", [item["model"] for item in result["ranked_hypotheses"]])
+        self.assertEqual(result["scope"].split(";")[0], "diagnostic fingerprint only")
 
 
 class ComparisonTests(unittest.TestCase):
@@ -203,6 +217,95 @@ class ComparisonTests(unittest.TestCase):
         report, exit_code = compare(self.reference, self.candidate, self.case)
         self.assertEqual(exit_code, EXIT_PASS)
         self.assertEqual(report["window_metrics"]["early"]["volume_raw"]["samples"], 2)
+
+    def test_auto_alignment_recovers_shift_and_applies_playback_warmup(self) -> None:
+        generator = random.Random(7)
+        reference_packets = []
+        candidate_packets = []
+        for elapsed_ms in range(0, 1601, 20):
+            envelope = generator.random() * 10
+            timestamp = 1_000_000_000 + elapsed_ms * 1_000_000
+            reference_packets.append(
+                audio_sync_packet(timestamp, "10.0.0.1:11988", volume_raw=envelope, volume_smoothed=envelope)
+            )
+            candidate_packets.append(
+                audio_sync_packet(
+                    timestamp + 150_000_000,
+                    "10.0.0.2:11988",
+                    volume_raw=envelope,
+                    volume_smoothed=envelope,
+                )
+            )
+        for path, identity, packets in (
+            (self.reference, "reference", reference_packets),
+            (self.candidate, "candidate", candidate_packets),
+        ):
+            write_capture(path, identity, packets)
+            artifact = json.loads(path.read_text(encoding="utf-8"))
+            artifact["metadata"]["playback_started_monotonic_ns"] = 1_000_000_000
+            path.write_text(json.dumps(artifact), encoding="utf-8")
+        write_case(
+            self.case,
+            alignment={"mode": "auto", "search_range_ms": 250, "step_ms": 5},
+            stimulus={"type": "tone", "warmup_seconds": 0.5, "measurement_seconds": 1.0},
+            thresholds={"volume_raw": {"mae": 0.01}},
+        )
+
+        report, exit_code = compare(self.reference, self.candidate, self.case)
+
+        self.assertEqual(exit_code, EXIT_PASS, report)
+        self.assertAlmostEqual(report["alignment"]["candidate_offset_ms"], -150, delta=5)
+        self.assertEqual(report["alignment"]["method"], "envelope_cross_correlation")
+        self.assertFalse(report["alignment"]["ambiguous"])
+        self.assertEqual(report["window"]["start_ns"], 1_500_000_000)
+        self.assertEqual(report["window"]["requested_start_ms"], 500)
+
+    def test_ambiguous_auto_alignment_is_inconclusive(self) -> None:
+        packets_reference = [
+            audio_sync_packet(1_000_000_000 + index * 20_000_000, "10.0.0.1:11988")
+            for index in range(20)
+        ]
+        packets_candidate = [
+            audio_sync_packet(1_000_000_000 + index * 20_000_000, "10.0.0.2:11988")
+            for index in range(20)
+        ]
+        for path, identity, packets in (
+            (self.reference, "reference", packets_reference),
+            (self.candidate, "candidate", packets_candidate),
+        ):
+            write_capture(path, identity, packets)
+            artifact = json.loads(path.read_text(encoding="utf-8"))
+            artifact["metadata"]["playback_started_monotonic_ns"] = 1_000_000_000
+            path.write_text(json.dumps(artifact), encoding="utf-8")
+        write_case(
+            self.case,
+            alignment={"mode": "auto", "search_range_ms": 100, "step_ms": 5},
+            stimulus={"type": "tone", "measurement_seconds": 0.3},
+        )
+
+        report, exit_code = compare(self.reference, self.candidate, self.case)
+
+        self.assertEqual(exit_code, EXIT_INCONCLUSIVE)
+        self.assertTrue(report["alignment"]["ambiguous"])
+        self.assertTrue(any("latency estimate is ambiguous" in error for error in report["validity_errors"]))
+
+    def test_band_scorecard_separates_shape_and_level(self) -> None:
+        reference_packets = [
+            audio_sync_packet(1_000_000_000 + index * 20_000_000, "10.0.0.1:11988", fft=(10,) * 16)
+            for index in range(4)
+        ]
+        candidate_packets = [
+            audio_sync_packet(1_000_000_000 + index * 20_000_000, "10.0.0.2:11988", fft=(20,) * 16)
+            for index in range(4)
+        ]
+        write_capture(self.reference, "reference", reference_packets)
+        write_capture(self.candidate, "candidate", candidate_packets)
+        write_case(self.case, thresholds={"volume_raw": {"mae": 10}})
+
+        report, _ = compare(self.reference, self.candidate, self.case)
+
+        self.assertEqual(report["band_shape_level"]["0"]["level_ratio_db"], 20 * math.log10(2))
+        self.assertEqual(report["scorecard"]["normalized_profile_mae"], 0)
 
 
 class ExecutionTests(unittest.TestCase):

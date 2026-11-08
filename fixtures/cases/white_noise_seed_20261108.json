@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "id": "white-noise-seed-20261108",
+  "stimulus": {
+    "audio_file": "../audio/white_noise_seed_20261108.wav",
+    "type": "white_noise",
+    "seed": 20261108,
+    "warmup_seconds": 0.5,
+    "measurement_seconds": 3
+  },
+  "timing": {
+    "capture_duration_seconds": 5
+  },
+  "required_settings": ["sample_rate_hz", "fft_size", "fft_window", "pink_index", "fft_scaling"],
+  "alignment": {
+    "mode": "auto",
+    "search_range_ms": 400,
+    "step_ms": 5,
+    "maximum_pair_distance_ms": 30
+  },
+  "minimum_coverage": 0.8,
+  "thresholds": {
+    "fft.0": {"mae": 30},
+    "fft.4": {"mae": 30},
+    "fft.8": {"mae": 30},
+    "fft.12": {"mae": 30}
+  }
+}

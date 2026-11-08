@@ -18,7 +18,9 @@
     "fft_scaling"
   ],
   "alignment": {
-    "candidate_offset_ms": 0,
+    "mode": "auto",
+    "search_range_ms": 400,
+    "step_ms": 5,
     "maximum_pair_distance_ms": 30
   },
   "minimum_coverage": 0.8,

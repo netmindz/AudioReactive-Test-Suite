@@ -62,6 +62,15 @@ def _amplitude_modulated(carrier_hz: float, modulation_hz: float, amplitude: flo
     return sample
 
 
+def _level_steps(carrier_hz: float, levels: tuple[float, ...]) -> Callable[[int, int], float]:
+    def sample(index: int, _: int) -> float:
+        time_seconds = index / SAMPLE_RATE_HZ
+        level_index = min(int(time_seconds), len(levels) - 1)
+        return levels[level_index] * math.sin(2 * math.pi * carrier_hz * time_seconds)
+
+    return sample
+
+
 def _white_noise(seed: int, amplitude: float) -> Callable[[int, int], float]:
     generator = random.Random(seed)
     return lambda _index, _total: amplitude * generator.uniform(-1, 1)
@@ -138,6 +147,12 @@ def create_sample_set(output_directory: str | Path) -> Path:
             5,
             _amplitude_modulated(440, 2, 0.7),
             {"type": "amplitude_modulation", "carrier_hz": 440, "modulation_hz": 2, "amplitude": 0.7},
+        ),
+        (
+            "level_steps_440hz.wav",
+            5,
+            _level_steps(440, (0.1, 0.25, 0.45, 0.7, 0.9)),
+            {"type": "level_steps", "carrier_hz": 440, "levels": [0.1, 0.25, 0.45, 0.7, 0.9]},
         ),
         (
             "white_noise_seed_20261108.wav",

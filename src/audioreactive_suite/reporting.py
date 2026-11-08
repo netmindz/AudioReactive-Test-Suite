@@ -16,6 +16,16 @@ def render_summary(report: dict[str, Any]) -> str:
             f"({coverage['ratio']:.1%})"
         ),
     ]
+    scorecard = report.get("scorecard", {})
+    if scorecard:
+        shape = scorecard.get("mean_shape_correlation")
+        level = scorecard.get("mean_absolute_level_error_db")
+        shape_text = f"{shape:.3f}" if isinstance(shape, (int, float)) else "n/a"
+        level_text = f"{level:.2f} dB" if isinstance(level, (int, float)) else "n/a"
+        lines.append(f"Band scorecard: mean temporal shape correlation {shape_text}; mean absolute level error {level_text}")
+    model = report.get("reference_model")
+    if isinstance(model, dict) and model.get("best_match"):
+        lines.append(f"Closest simplified DSP fingerprint: {model['best_match']}")
     if report["validity_errors"]:
         lines.extend(["", "Invalid or inconclusive evidence:"])
         lines.extend(f"- {error}" for error in report["validity_errors"])

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "level-steps-440hz",
+  "stimulus": {
+    "audio_file": "../audio/level_steps_440hz.wav",
+    "type": "level_steps",
+    "carrier_hz": 440,
+    "levels": [0.1, 0.25, 0.45, 0.7, 0.9],
+    "warmup_seconds": 0.5,
+    "measurement_seconds": 4
+  },
+  "timing": {
+    "capture_duration_seconds": 6
+  },
+  "required_settings": ["sample_rate_hz", "fft_size", "fft_window", "agc_mode", "dynamics_limiter"],
+  "alignment": {
+    "mode": "auto",
+    "search_range_ms": 400,
+    "step_ms": 5,
+    "maximum_pair_distance_ms": 30
+  },
+  "minimum_coverage": 0.8,
+  "analysis_windows_ms": [
+    {"id": "step-1", "start": 500, "end": 1000},
+    {"id": "step-2", "start": 1000, "end": 2000},
+    {"id": "step-3", "start": 2000, "end": 3000},
+    {"id": "step-4", "start": 3000, "end": 4000}
+  ],
+  "thresholds": {
+    "volume_raw": {"mae": 25},
+    "volume_smoothed": {"mae": 25}
+  }
+}

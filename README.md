@@ -40,7 +40,7 @@ python3 -m audioreactive_suite capture \
 Usable 22,050 Hz mono PCM WAV fixtures are committed in
 [`fixtures/audio`](fixtures/audio). They include silence; low-to-high single
 tones; a multi-tone signal; a logarithmic sweep; a click train; amplitude
-modulation; and deterministic white and pink noise. Their exact duration,
+modulation; stepped levels; and deterministic white and pink noise. Their exact duration,
 frequency, amplitude and noise seeds are in
 [`fixtures/audio/manifest.json`](fixtures/audio/manifest.json).
 
@@ -74,5 +74,22 @@ python3 -m audioreactive_suite run \
 The supplied tone, click and sweep cases are starting profiles, not universal
 WLED tolerances. Calibrate thresholds against repeated captures for the pinned
 firmware, input routing and settings before treating a result as conformance.
-Unknown or mismatched required settings, unsuccessful playback, mixed sources,
-or insufficient overlap result in `inconclusive`, never a pass.
+Cases estimate candidate latency using envelope correlation when their
+`alignment.mode` is `auto`; the report includes the signed offset, confidence,
+search range and ambiguity decision. An ambiguous estimate makes the result
+inconclusive. The `stimulus.warmup_seconds` and `measurement_seconds` fields
+select the score window relative to the recorded playback start, not the first
+received packet.
+
+The report separates per-band temporal shape correlation and normalized profile
+error from level ratio in dB. When a case references an audio fixture, it also
+ranks simplified FFT-band fingerprints (including mapping, sample-rate, FFT-size,
+pink-correction and scaling variants). This is a diagnostic approximation, not a
+bit-accurate or hardware-validated MoonModules reference; tied or unmatched
+fingerprints should not be treated as proof of a specific implementation bug.
+
+Cases cover tone, sweep, clicks, multi-tone, amplitude modulation, stepped levels,
+and seeded white/pink noise. Unknown or mismatched required settings,
+unsuccessful playback, mixed sources, ambiguous latency, or insufficient overlap
+result in `inconclusive`, never a pass. Thresholds still require calibration from
+maintainer hardware captures for a pinned profile.
