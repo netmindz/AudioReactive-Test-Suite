@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "id": "sweep-80-8000hz",
+  "stimulus": {
+    "audio_file": "../audio/sweep_80_8000hz.wav",
+    "type": "logarithmic_sweep",
+    "start_hz": 80,
+    "end_hz": 8000,
+    "measurement_seconds": 5
+  },
+  "timing": {
+    "capture_duration_seconds": 7
+  },
+  "required_settings": [
+    "sample_rate_hz",
+    "fft_size",
+    "fft_window",
+    "frequency_distribution"
+  ],
+  "alignment": {
+    "candidate_offset_ms": 0,
+    "maximum_pair_distance_ms": 30
+  },
+  "minimum_coverage": 0.8,
+  "strong_signal_magnitude": 1,
+  "thresholds": {
+    "dominant_frequency": {
+      "mae": 80
+    },
+    "fft.0": {
+      "mae": 20
+    },
+    "fft.7": {
+      "mae": 20
+    },
+    "fft.15": {
+      "mae": 20
+    }
+  }
+}

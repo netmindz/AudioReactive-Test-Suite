@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "click-train-500ms",
+  "stimulus": {
+    "audio_file": "../audio/click_train_500ms.wav",
+    "type": "click_train",
+    "interval_ms": 500,
+    "measurement_seconds": 4
+  },
+  "timing": {
+    "capture_duration_seconds": 6
+  },
+  "required_settings": [
+    "sample_rate_hz",
+    "fft_size",
+    "peak_threshold",
+    "peak_hold_ms"
+  ],
+  "alignment": {
+    "candidate_offset_ms": 0,
+    "maximum_pair_distance_ms": 30
+  },
+  "minimum_coverage": 0.8,
+  "peak_tolerance_ms": 60,
+  "thresholds": {
+    "peak": {
+      "missed": 0,
+      "extra": 0
+    }
+  }
+}

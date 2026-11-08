@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "sample_rate_hz": 22050,
+  "channels": 1,
+  "encoding": "PCM signed 16-bit little-endian WAV",
+  "files": [
+    {
+      "id": "silence_2s",
+      "filename": "silence_2s.wav",
+      "duration_seconds": 2,
+      "type": "silence"
+    },
+    {
+      "id": "tone_86hz",
+      "filename": "tone_86hz.wav",
+      "duration_seconds": 3,
+      "type": "tone",
+      "frequency_hz": 86,
+      "amplitude": 0.7
+    },
+    {
+      "id": "tone_172hz",
+      "filename": "tone_172hz.wav",
+      "duration_seconds": 3,
+      "type": "tone",
+      "frequency_hz": 172,
+      "amplitude": 0.7
+    },
+    {
+      "id": "tone_344hz",
+      "filename": "tone_344hz.wav",
+      "duration_seconds": 3,
+      "type": "tone",
+      "frequency_hz": 344,
+      "amplitude": 0.7
+    },
+    {
+      "id": "tone_688hz",
+      "filename": "tone_688hz.wav",
+      "duration_seconds": 3,
+      "type": "tone",
+      "frequency_hz": 688,
+      "amplitude": 0.7
+    },
+    {
+      "id": "tone_1376hz",
+      "filename": "tone_1376hz.wav",
+      "duration_seconds": 3,
+      "type": "tone",
+      "frequency_hz": 1376,
+      "amplitude": 0.7
+    },
+    {
+      "id": "tone_2752hz",
+      "filename": "tone_2752hz.wav",
+      "duration_seconds": 3,
+      "type": "tone",
+      "frequency_hz": 2752,
+      "amplitude": 0.7
+    },
+    {
+      "id": "tone_5504hz",
+      "filename": "tone_5504hz.wav",
+      "duration_seconds": 3,
+      "type": "tone",
+      "frequency_hz": 5504,
+      "amplitude": 0.7
+    },
+    {
+      "id": "multi_tone_220_1000_4000hz",
+      "filename": "multi_tone_220_1000_4000hz.wav",
+      "duration_seconds": 3,
+      "type": "multi_tone",
+      "frequencies_hz": [
+        220,
+        1000,
+        4000
+      ],
+      "amplitude": 0.75
+    },
+    {
+      "id": "sweep_80_8000hz",
+      "filename": "sweep_80_8000hz.wav",
+      "duration_seconds": 5,
+      "type": "logarithmic_sweep",
+      "start_hz": 80,
+      "end_hz": 8000,
+      "amplitude": 0.7
+    },
+    {
+      "id": "click_train_500ms",
+      "filename": "click_train_500ms.wav",
+      "duration_seconds": 4,
+      "type": "click_train",
+      "interval_ms": 500,
+      "click_duration_ms": 10,
+      "amplitude": 0.9
+    },
+    {
+      "id": "amplitude_modulated_440hz_2hz",
+      "filename": "amplitude_modulated_440hz_2hz.wav",
+      "duration_seconds": 5,
+      "type": "amplitude_modulation",
+      "carrier_hz": 440,
+      "modulation_hz": 2,
+      "amplitude": 0.7
+    },
+    {
+      "id": "white_noise_seed_20261108",
+      "filename": "white_noise_seed_20261108.wav",
+      "duration_seconds": 4,
+      "type": "white_noise",
+      "seed": 20261108,
+      "amplitude": 0.55
+    },
+    {
+      "id": "pink_noise_seed_20261108",
+      "filename": "pink_noise_seed_20261108.wav",
+      "duration_seconds": 4,
+      "type": "pink_noise",
+      "seed": 20261108,
+      "amplitude": 0.55
+    }
+  ]
+}
