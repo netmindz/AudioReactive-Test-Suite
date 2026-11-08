@@ -1,0 +1,2 @@
+[console_scripts]
+audioreactive-suite = audioreactive_suite.cli:main
