@@ -75,9 +75,10 @@ the version-specific reference behavior and its configuration dependencies.
 8. **Integration:** Do not require candidates to use a particular language or
    implement file input. Support manual and automated workflows appropriate to
    desktop, mobile and feature-based senders.
-9. **Validity:** Missing packets, failed playback, ambiguous source identity,
-   insufficient overlap or unreliable alignment must not be reported as a
-   successful comparison.
+9. **Validity:** Unexpected missing packets, failed playback, ambiguous source
+   identity, insufficient overlap or unreliable alignment must not be reported
+   as a successful comparison. Handle configured reference silence suppression
+   explicitly; absence of packets alone is not proof of silence or agreement.
 10. **Domain diagnostics:** Use targeted tests to distinguish likely FFT
     frequency mapping, pink correction, microphone profile, scaling, AGC,
     squelch, limiter and peak-detection mistakes. Report evidence and actionable,
@@ -99,6 +100,10 @@ the version-specific reference behavior and its configuration dependencies.
   corresponding metrics and fail appropriate thresholds.
 - Missing traffic and insufficient usable overlap produce an invalid or
   inconclusive result, not a pass.
+- A long silent run with reference silence-stop enabled distinguishes expected
+  suppression from unexpected packet loss; it scores packet fields only while
+  both streams have adequate coverage, and verifies resumed traffic after sound
+  returns. A silent-start capture without evidence of prior traffic is not a pass.
 - Saved captures and the same comparison configuration reproduce the same
   metrics and verdict.
 - A documented hardware workflow records sufficient settings and calibration

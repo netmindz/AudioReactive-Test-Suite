@@ -15,6 +15,14 @@ The bin spacing is respectively 43.0664 and 35.15625 Hz. Sliding-window
 builds can reuse half a window; C3/C6 skip every second FFT. These are not
 universal constants across versions or builds.
 
+In the [send loop](https://github.com/MoonModules/WLED-AudioReactive-Usermod/blob/a4338f2ae26e303653c8fffbbb9af975401cefc5/audio_reactive.h#L2632-L2649),
+the standard path schedules a packet when more than 20 ms has elapsed. The
+fast path sends on a new FFT result or after more than 24 ms as a fallback.
+At 22,050 Hz a full 512-sample acquisition takes about 23.2 ms, so packet
+updates and FFT updates are not necessarily one-to-one; scheduling, overlapping
+windows and target-specific skipped FFTs also matter. Compare audio behavior
+over time rather than requiring identical packet cadence or unique FFT data.
+
 Default `fftWindow=0` is Blackman-Harris; Hann, Nuttall, Hamming, Flat-top and
 Blackman are selectable. Window-specific correction `wc` is applied to the
 channels, with extra correction for reused samples. After the FFT and magnitude
@@ -23,6 +31,11 @@ mapping. `fftAddAvg` takes an inclusive range and uses RMS averaging on
 FPU-capable multicore targets, arithmetic mean otherwise; one-bin ranges return
 that bin. See [windowing and mapping](https://github.com/MoonModules/WLED-AudioReactive-Usermod/blob/a4338f2ae26e303653c8fffbbb9af975401cefc5/audio_reactive.h#L902-L1065)
 and [averaging](https://github.com/MoonModules/WLED-AudioReactive-Usermod/blob/a4338f2ae26e303653c8fffbbb9af975401cefc5/audio_reactive.h#L540-L555).
+
+Before any reused-sample adjustment, `wc` is 1.0 for Blackman-Harris,
+0.66415918066 for Hann, 0.9916873881 for Nuttall, 0.664159180663 for
+Hamming, 1.276771793156 for Flat-top and 0.84762867875 for Blackman.
+When old samples are reused, it is multiplied by 1.10.
 
 ## GEQ mapping
 
@@ -66,6 +79,11 @@ In particular, the filtered right-shift branch still uses bins 1 and 2 even
 though a nearby source comment says frequencies below 100 Hz are skipped.
 When the FFT gate is closed, previous channel calculations decay instead of
 instantly becoming zero.
+
+The [FFT and channel-mapping gate](https://github.com/MoonModules/WLED-AudioReactive-Usermod/blob/a4338f2ae26e303653c8fffbbb9af975401cefc5/audio_reactive.h#L902-L908)
+is `fabsf(volumeSmth) > 0.25f`, so it depends on the volume/AGC path, not an
+independently measured spectral level. This is separate from the squelch and
+the magnitude output's `< 1` gate.
 
 ## Profiles and output scaling
 
@@ -117,7 +135,19 @@ After FFT peak calculation, a major peak below one bin becomes 1 Hz with zero
 magnitude; a peak above 0.42 × sample rate restores the previous peak and
 magnitude. The frequency is then clamped to 1–11025 Hz. When the FFT gate is
 closed, the FFT path sets frequency to 1 and magnitude to 0.001. Optional
-human-ear weighting and subsequent transmission processing also matter.
+human-ear weighting and subsequent transmission processing also matter. The
+FFT path multiplies the library's `majorPeak` magnitude by the window
+correction `wc`, with the guards and optional human-ear correction described
+in the source. In the local processing loop `my_magnitude` is set to that
+`FFT_Magnitude`, multiplied by `multAgc` if AGC is on, and forced to 0.001
+when `volumeSmth < 1`. The packet sends `my_magnitude`, not raw FFT-bin
+amplitude; the manual GEQ gain and GEQ profile multipliers are not applied to
+this value. For the [declared arduinoFFT 2.0.1 dependency](https://github.com/MoonModules/WLED-AudioReactive-Usermod/blob/a4338f2ae26e303653c8fffbbb9af975401cefc5/library.json#L7-L11),
+[`majorPeak`](https://github.com/kosme/arduinoFFT/blob/v2.0.1/src/arduinoFFT.cpp)
+returns the absolute curvature of the three bins around the peak as its
+magnitude, not the peak bin's amplitude. Different library versions can
+behave differently. See [local processing](https://github.com/MoonModules/WLED-AudioReactive-Usermod/blob/a4338f2ae26e303653c8fffbbb9af975401cefc5/audio_reactive.h#L2504-L2511)
+and [packet assignment](https://github.com/MoonModules/WLED-AudioReactive-Usermod/blob/a4338f2ae26e303653c8fffbbb9af975401cefc5/audio_reactive.h#L1911-L1915).
 See [FFT peak and gate](https://github.com/MoonModules/WLED-AudioReactive-Usermod/blob/a4338f2ae26e303653c8fffbbb9af975401cefc5/audio_reactive.h#L940-L990).
 
 The [FFT peak detector](https://github.com/MoonModules/WLED-AudioReactive-Usermod/blob/a4338f2ae26e303653c8fffbbb9af975401cefc5/audio_reactive.h#L1251-L1280)
@@ -136,3 +166,43 @@ v2 senders may leave this byte reserved. Zero is also used for legacy behavior;
 do not infer loss from a nonzero byte alone. See
 [packet definition](https://github.com/MoonModules/WLED-AudioReactive-Usermod/blob/a4338f2ae26e303653c8fffbbb9af975401cefc5/audio_reactive.h#L1352-L1363)
 and [transmitter](https://github.com/MoonModules/WLED-AudioReactive-Usermod/blob/a4338f2ae26e303653c8fffbbb9af975401cefc5/audio_reactive.h#L1886-L1933).
+
+## Silence and UDP transmission
+
+The pinned firmware defaults `audioSyncSilenceStop` to true with
+`AUDIOSYNC_SEND_STOP_MS = 30000`. In send mode, `volumeSmth >= 1` clears the
+silence timer; below 1 starts it if not already running. Once continuous silence
+reaches 30 seconds, scheduled sends are suppressed until sound clears the
+timer, then normal scheduling resumes. This is internal effect-facing
+`volumeSmth`, not necessarily the packet's pre-limiter `sampleSmth`. The timer
+can already be running before a capture starts. Do not equate packet absence
+with known silence or a working sender. See [defaults](https://github.com/MoonModules/WLED-AudioReactive-Usermod/blob/a4338f2ae26e303653c8fffbbb9af975401cefc5/audio_reactive.h#L231-L241)
+and [send logic](https://github.com/MoonModules/WLED-AudioReactive-Usermod/blob/a4338f2ae26e303653c8fffbbb9af975401cefc5/audio_reactive.h#L2632-L2649);
+the [technical spec](TECHNICAL_SPEC.md#stimuli-and-execution) describes test
+validity when suppression is enabled.
+
+## Worked channel example
+
+For illustration, choose 22,050 Hz, `freqDist=0`, `useInputFilter != 1`,
+`fftWindow=0`, `pinkIndex=0`, square-root scaling, manual gain with
+`sampleGain=60`, `inputLevel=128`, and the limiter **off** with no reused
+samples. This is an explicitly chosen configuration, not the canonical
+profile or a claim that the limiter is off by default. Assume the gate is open
+and a particular filtered and windowed PCM frame produces FFT magnitude 1600
+in bin 1 before the divide-by-16. The exact PCM-to-FFT amplitude depends on the
+input filter and FFT implementation; 1600 is an illustrative intermediate,
+not the amplitude of a specified PCM tone.
+
+1. Blackman-Harris has `wc=1`; after division, bin 1 is 100. Channel 0 maps
+   to bin 1, so its mapped value is 100.
+2. The default profile's 16 factors, channels 0–15, are
+   `[1.70, 1.71, 1.73, 1.78, 1.68, 1.56, 1.55, 1.63, 1.79, 1.62, 1.80, 2.06, 2.47, 3.35, 6.83, 9.55]`.
+   Apply channel 0's 1.70, downscale 0.40 and manual gain
+   `60/40 × 128/128 + 1/16 = 1.5625`: the result is 106.25.
+3. With limiting off and no fast-path mixing, apply square-root mode:
+   `sqrt(0.38 × 106.25 - 6) × (0.85 + 0/4.5) × 255/16 ≈ 79.43`.
+   Rounding and clamping yields byte 79 in `fftResult[0]`, at packet offset 18.
+
+The other channels, volume, peak flag and magnitude require their own input
+and state; this example cannot determine a complete packet. Window correction,
+AGC, limiter and historical state change the result.

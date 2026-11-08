@@ -43,6 +43,12 @@ calibration can make differing physical input paths comparable; it must not
 silently mask a processing discrepancy. Some senders may lack settings; record
 that limitation rather than asserting equivalence.
 
+Record `audioSyncSilenceStop` independently for each sender, together with the
+reference revision's suppression timeout and the observed start of continuous
+silence. This transport policy may differ from DSP settings: either configure
+it consistently for a transport comparison or report the difference explicitly.
+Do not treat an unsupported or unverified setting as known.
+
 ## Stimuli and execution
 
 Define versioned cases for silence, low/mid/high and boundary-frequency tones,
@@ -56,6 +62,26 @@ Start capture before playback and stop it after the trailing interval. Playback
 or adapter failures must invalidate the case. Where playback is manual, record
 the timing source and any uncertainty; do not silently assume success.
 
+For packet-value silence tests, either disable reference silence-stop and verify
+continued traffic, or keep the entire continuous silent period (including
+run-in, settling and measurement) safely below the configured timeout.
+Budget from the earliest possible start of continuous silence, including
+pre-capture/run-in silence, rather than just the nominal start of a WAV; allow
+scheduling and timestamp uncertainty. The suppression timer uses internal
+`volumeSmth`, which need not equal the transmitted smoothed sample. If the
+start cannot be bounded, the time budget cannot be established.
+
+For a long-silence transport test, first observe valid reference packets, then
+establish the sustained internal `volumeSmth < 1` interval using reference
+instrumentation or a validated bound, and check suppression after the configured
+timeout and resumption once `volumeSmth >= 1`, allowing specified timing/network
+tolerances. An absence that could also be caused by
+lost connectivity, capture failure or unknown prior silence is inconclusive,
+not evidence of suppression. Distinguish transport-policy results from DSP
+field results; never synthesize zero-valued reference packets in suppressed
+intervals. Missing packets outside a verified suppression period, failure to
+resume, or inadequate field coverage must not result in a conformance pass.
+
 ### Targeted test catalogue
 
 Use the pinned [DSP reference](REFERENCE_DSP.md) and each configuration to
@@ -68,7 +94,7 @@ differences, not diagnoses of hidden implementation details.
 | Tone at each band center and around edges | Compare the band-response pattern, including overlapping ranges and window leakage. Unexpected energy in adjacent or distant bands suggests bin mapping, FFT rate/size or frequency distribution. |
 | Frequency sweep and two-tone | Compare channel transitions and dominant frequency; misplaced transitions suggest sample-rate, bin-boundary or FFT errors. |
 | Seeded pink and white noise under selected profiles | Compare per-band shapes against the same reference profile; a frequency-dependent bias suggests pink correction, microphone profile or scaling. Do not assume pink input necessarily yields a flat output. |
-| Silence and below/above-squelch levels | Compare volume, FFT and major-peak behavior after settling. Residual energy suggests gating, gain or noise-floor differences; verify the selected reference's silence behavior rather than assuming an unconditional frequency value. |
+| Silence and below/above-squelch levels | Compare volume, FFT and major-peak behavior after settling. Residual energy suggests gating, gain or noise-floor differences; verify the selected reference's silence behavior rather than assuming an unconditional frequency value. Include a separate long-silence suppression and sound-resumption case. |
 | Level steps and amplitude modulation | Compare attack/release curves and AGC settling for each preset. Excessive overshoot or slow recovery suggests gain, AGC or dynamics-limiter differences. |
 | Click trains at multiple intervals, including around hold-off | Compare peak events with a tolerance. Extra or missed events suggest bin/threshold, hold-off or packet peak handling; a regular musical beat is not by itself the oracle. |
 
