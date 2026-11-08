@@ -1,5 +1,0 @@
-Metadata-Version: 2.4
-Name: audioreactive-test-suite
-Version: 0.1.0
-Summary: Capture and compare WLED Audio Sync v2 streams.
-Requires-Python: >=3.11

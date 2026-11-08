@@ -15,7 +15,7 @@
   "required_settings": ["sample_rate_hz", "fft_size", "fft_window", "agc_mode", "dynamics_limiter"],
   "alignment": {
     "mode": "auto",
-    "search_range_ms": 400,
+    "search_range_ms": 1000,
     "step_ms": 5,
     "maximum_pair_distance_ms": 30
   },
@@ -27,8 +27,8 @@
     {"id": "step-4", "start": 3000, "end": 4000},
     {"id": "step-5", "start": 4000, "end": 4500}
   ],
-  "thresholds": {
-    "volume_raw": {"mae": 25},
-    "volume_smoothed": {"mae": 25}
+  "thresholds": {},
+  "shape_thresholds": {
+    "minimum_shape_correlation": 0.7
   }
 }

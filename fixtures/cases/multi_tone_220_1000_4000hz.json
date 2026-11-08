@@ -14,16 +14,16 @@
   "required_settings": ["sample_rate_hz", "fft_size", "fft_window", "fft_scaling"],
   "alignment": {
     "mode": "auto",
-    "search_range_ms": 400,
+    "search_range_ms": 1000,
     "step_ms": 5,
     "maximum_pair_distance_ms": 30
   },
   "minimum_coverage": 0.8,
   "strong_signal_magnitude": 1,
   "thresholds": {
-    "dominant_frequency": {"mae": 100},
-    "fft.0": {"mae": 30},
-    "fft.6": {"mae": 30},
-    "fft.12": {"mae": 30}
+    "dominant_frequency": {"mae": 100}
+  },
+  "shape_thresholds": {
+    "normalized_profile_mae": 0.15
   }
 }

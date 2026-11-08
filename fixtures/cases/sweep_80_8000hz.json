@@ -19,7 +19,7 @@
   ],
   "alignment": {
     "mode": "auto",
-    "search_range_ms": 400,
+    "search_range_ms": 1000,
     "step_ms": 5,
     "maximum_pair_distance_ms": 30
   },
@@ -28,15 +28,10 @@
   "thresholds": {
     "dominant_frequency": {
       "mae": 80
-    },
-    "fft.0": {
-      "mae": 20
-    },
-    "fft.7": {
-      "mae": 20
-    },
-    "fft.15": {
-      "mae": 20
     }
+  },
+  "shape_thresholds": {
+    "normalized_profile_mae": 0.15,
+    "minimum_shape_correlation": 0.7
   }
 }

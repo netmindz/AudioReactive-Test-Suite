@@ -8,11 +8,8 @@ import wave
 from pathlib import Path
 from typing import Any
 
+from .bands import geq_bands
 
-_REFERENCE_BANDS = [
-    (1, 1), (2, 2), (3, 4), (5, 6), (7, 9), (10, 12), (13, 18), (19, 25),
-    (26, 32), (33, 43), (44, 55), (56, 69), (70, 85), (86, 103), (104, 164), (165, 215),
-]
 _PINK_PROFILE = [1.70, 1.71, 1.73, 1.78, 1.68, 1.56, 1.55, 1.63, 1.79, 1.62, 1.80, 2.06, 2.47, 3.35, 6.83, 9.55]
 
 
@@ -43,17 +40,11 @@ def _mapping_for(
             (max(1, math.floor(1 + band * width)), min(maximum_bin, math.ceil(1 + (band + 1) * width) - 1))
             for band in range(16)
         ]
-    if frequency_distribution == 1:
-        source_bands = [
-            (1, 1), (2, 2), (3, 3), (4, 4), (5, 6), (7, 8), (9, 10), (11, 13),
-            (14, 18), (19, 25), (26, 36), (37, 45), (46, 66), (67, 97), (98, 164), (165, 215),
-        ]
-    else:
-        source_bands = _REFERENCE_BANDS
+    source_bands = geq_bands(frequency_distribution)
     rate_ratio = actual_rate / interpreted_rate if interpreted_rate else 1.0
     max_bin = fft_size // 2 - 1
     mapped_bands = []
-    for low, high in source_bands:
+    for low, high, _ in source_bands:
         mapped_low = max(1, round(low * rate_ratio))
         mapped_high = min(max_bin, round(high * rate_ratio))
         mapped_bands.append(
@@ -70,11 +61,23 @@ def _fingerprint(
     mapping: str = "reference",
     interpreted_rate: int | None = None,
     frequency_distribution: int = 0,
+    use_input_filter: bool = False,
     pink_correction: bool = True,
     scaling: str = "sqrt",
+    input_gain: float = 1.5625,
+    pink_profile: list[float] | None = None,
+    window_correction: float = 1.0,
+    average_mode: str = "mean",
+    agc_post_gain: float = 1.0,
+    pcm_to_fft_scale: float = 1.0,
 ) -> list[float]:
     hop = max(1, round(sample_rate * 0.02))
-    bands = _mapping_for(fft_size, sample_rate, mapping, interpreted_rate, frequency_distribution)
+    if mapping == "linear_band_split":
+        bands = [(low, high, 1.0) for low, high in _mapping_for(
+            fft_size, sample_rate, mapping, interpreted_rate, frequency_distribution
+        )]
+    else:
+        bands = geq_bands(frequency_distribution, use_input_filter)
     window = [
         0.35875
         - 0.48829 * math.cos(2 * math.pi * index / (fft_size - 1))
@@ -82,7 +85,7 @@ def _fingerprint(
         - 0.01168 * math.cos(6 * math.pi * index / (fft_size - 1))
         for index in range(fft_size)
     ]
-    maximum_bin = min(fft_size // 2 - 1, max(high for _, high in bands))
+    maximum_bin = min(fft_size // 2 - 1, max(high for _, high, _ in bands))
     bit_reversed = []
     for index in range(fft_size):
         value = index
@@ -100,8 +103,13 @@ def _fingerprint(
         width *= 2
     accumulated = [0.0] * 16
     frame_count = 0
+    selected_pink_profile = pink_profile or _PINK_PROFILE
+    scale_mode = {"none": 0, "log": 1, "linear": 2, "sqrt": 3}.get(scaling, scaling)
     for start in range(0, len(samples) - fft_size + 1, hop):
-        spectrum = [complex(samples[start + index] * window[index], 0) for index in range(fft_size)]
+        spectrum = [
+            complex(samples[start + index] * pcm_to_fft_scale * window[index], 0)
+            for index in range(fft_size)
+        ]
         spectrum = [spectrum[index] for index in bit_reversed]
         width = 2
         for twiddles in butterflies:
@@ -114,21 +122,26 @@ def _fingerprint(
                     spectrum[block + index + half_width] = even - odd
             width *= 2
         magnitudes = [abs(value) for value in spectrum[: maximum_bin + 1]]
-        for band, (low, high) in enumerate(bands):
+        for band, (low, high, band_multiplier) in enumerate(bands):
             lower = min(low, maximum_bin)
             upper = min(high, maximum_bin)
-            value = (
-                sum(magnitudes[lower : upper + 1]) / (upper - lower + 1)
-                if upper >= lower
-                else 0.0
+            bin_values = magnitudes[lower : upper + 1] if upper >= lower else []
+            if bin_values:
+                average = (
+                    math.sqrt(sum(value * value for value in bin_values) / len(bin_values))
+                    if average_mode == "rms"
+                    else sum(bin_values) / len(bin_values)
+                )
+            else:
+                average = 0.0
+            profile_factor = selected_pink_profile[band] if pink_correction else 1.0
+            mapped = average / 16 * window_correction * band_multiplier * profile_factor
+            if scale_mode:
+                mapped *= 0.40
+            mapped *= input_gain
+            accumulated[band] += _scale_fft_value(
+                mapped, band, scale_mode, agc_post_gain=agc_post_gain
             )
-            if pink_correction:
-                value *= _PINK_PROFILE[band]
-            if scaling == "sqrt":
-                value = math.sqrt(value)
-            elif scaling == "log":
-                value = math.log1p(value)
-            accumulated[band] += value
         frame_count += 1
     if frame_count == 0:
         return [0.0] * 16
@@ -137,132 +150,59 @@ def _fingerprint(
     return [value / total for value in accumulated] if total > 0 else [0.0] * 16
 
 
-def _rms_envelope(samples: list[float], sample_rate: int, frame_size: int) -> tuple[float, list[float]]:
-    hop = max(1, round(sample_rate * 0.02))
-    envelope = []
-    for start in range(0, len(samples) - frame_size + 1, hop):
-        frame = samples[start : start + frame_size]
-        envelope.append(math.sqrt(sum(value * value for value in frame) / len(frame)))
-    return hop / sample_rate, envelope
+def _scale_fft_value(value: float, band: int, mode: int | str, *, agc_post_gain: float = 1.0) -> int:
+    """Apply MoonModules' documented FFT output transfer function to one channel."""
+    if mode == 1:
+        current = value * 0.42 - 8.0
+        current = math.log(current) if current > 1 else 0.0
+        current *= 0.85 + band / 18.0
+        current = current * 255 / math.log(256)
+    elif mode == 2:
+        current = value * 0.30 - 2.0
+        if current < 1:
+            current = 0.0
+        current *= 0.85 + band / 1.8
+    elif mode == 3:
+        current = value * 0.38 - 6.0
+        current = math.sqrt(current) if current > 1 else 0.0
+        current *= 0.85 + band / 4.5
+        current = current * 255 / 16
+    else:
+        current = value - 2.0
+    current *= agc_post_gain
+    return max(0, min(255, int(current + 0.5)))
 
 
-def _correlation(left: list[float], right: list[float]) -> float | None:
-    if len(left) != len(right) or len(left) < 3:
-        return None
-    left_mean = sum(left) / len(left)
-    right_mean = sum(right) / len(right)
-    left_centered = [value - left_mean for value in left]
-    right_centered = [value - right_mean for value in right]
-    left_norm = math.sqrt(sum(value * value for value in left_centered))
-    right_norm = math.sqrt(sum(value * value for value in right_centered))
-    if left_norm <= 1e-9 or right_norm <= 1e-9:
-        return None
-    return sum(a * b for a, b in zip(left_centered, right_centered)) / (left_norm * right_norm)
+def _observed_profile(packets: list[Any]) -> list[float]:
+    if not packets:
+        return [0.0] * 16
+    levels = [sum(float(packet.fft[band]) for packet in packets) / len(packets) for band in range(16)]
+    total = sum(levels)
+    return [value / total for value in levels] if total > 0 else [0.0] * 16
 
 
-def _stateful_mutant_scores(
-    samples: list[float],
-    sample_rate: int,
-    frame_size: int,
-    candidate_packets: list[Any],
-    playback_start_ns: int | None,
-    candidate_offset_ns: int,
-) -> dict[str, Any]:
-    if playback_start_ns is None or not candidate_packets:
-        return {"available": False, "reason": "playback start and candidate packets are required"}
-    frame_seconds, envelope = _rms_envelope(samples, sample_rate, frame_size)
-    if len(envelope) < 3:
-        return {"available": False, "reason": "audio is too short for temporal model features"}
-
-    def audio_value(packet: Any) -> float | None:
-        elapsed = (packet.timestamp_ns + candidate_offset_ns - playback_start_ns) / 1_000_000_000
-        position = elapsed / frame_seconds
-        index = math.floor(position)
-        if index < 0 or index + 1 >= len(envelope):
-            return None
-        fraction = position - index
-        return envelope[index] + fraction * (envelope[index + 1] - envelope[index])
-
-    aligned = [(packet, audio_value(packet)) for packet in candidate_packets]
-    aligned = [(packet, value) for packet, value in aligned if value is not None]
-    audio_rms = [float(value) for _, value in aligned]
-    volume = [float(packet.volume_raw) for packet, _ in aligned]
-    magnitude = [float(packet.magnitude) for packet, _ in aligned]
-    volume_correlation = _correlation(audio_rms, volume)
-    magnitude_correlation = _correlation(audio_rms, magnitude)
-
-    maximum = max(envelope)
-    threshold = maximum * 0.5
-    predicted_events = [
-        index * frame_seconds
-        for index in range(1, len(envelope))
-        if envelope[index] >= threshold > envelope[index - 1]
-    ]
-    candidate_events = []
-    previously_high = False
-    for packet in candidate_packets:
-        if packet.peak and not previously_high:
-            candidate_events.append(
-                (packet.timestamp_ns + candidate_offset_ns - playback_start_ns) / 1_000_000_000
-            )
-        previously_high = packet.peak
-    remaining = list(candidate_events)
-    matched = 0
-    for predicted in predicted_events:
-        nearest = min(range(len(remaining)), key=lambda index: abs(remaining[index] - predicted), default=None)
-        if nearest is not None and abs(remaining[nearest] - predicted) <= 0.1:
-            matched += 1
-            remaining.pop(nearest)
-    precision = matched / len(candidate_events) if candidate_events else 0.0
-    recall = matched / len(predicted_events) if predicted_events else 0.0
-    peak_f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
-    stateful = {
-        "available": True,
-        "feature_samples": len(aligned),
-        "magnitude_as_amplitude": {
-            "audio_envelope_correlation": magnitude_correlation,
-            "method": "correlation of packet magnitude with input RMS envelope",
-        },
-        "volume_spike_peak_detector": {
-            "event_f1": peak_f1,
-            "predicted_events": len(predicted_events),
-            "candidate_events": len(candidate_events),
-            "matched_events": matched,
-            "method": "RMS envelope half-maximum rising crossings, 100 ms event tolerance",
-        },
-        "no_agc": {
-            "volume_envelope_correlation": volume_correlation,
-            "method": "correlation of packet raw volume with unprocessed input RMS envelope",
-        },
-        "caveat": "These temporal fingerprints are hypotheses, not a calibrated or bit-accurate AGC/peak model.",
-    }
-    stateful_scores = [
-        ("magnitude_as_amplitude", magnitude_correlation),
-        ("volume_spike_peak_detector", peak_f1),
-        ("no_agc", volume_correlation),
-    ]
-    stateful["ranked_hypotheses"] = [
-        {"model": name, "score": score}
-        for name, score in sorted(
-            ((name, score) for name, score in stateful_scores if score is not None),
-            key=lambda item: item[1],
-            reverse=True,
-        )
-    ]
-    stateful["best_match"] = (
-        stateful["ranked_hypotheses"][0]["model"] if stateful["ranked_hypotheses"] else None
+def _rank_hypotheses(
+    observed: list[float], hypotheses: dict[str, list[float]]
+) -> list[dict[str, Any]]:
+    return sorted(
+        [
+            {
+                "model": name,
+                "normalized_profile_mae": sum(abs(expected - actual) for expected, actual in zip(profile, observed)) / 16,
+            }
+            for name, profile in hypotheses.items()
+        ],
+        key=lambda item: item["normalized_profile_mae"],
     )
-    return stateful
 
 
 def compare_to_models(
     audio_path: str | Path,
+    reference_packets: list[Any],
     candidate_packets: list[Any],
     settings: dict[str, Any] | None = None,
-    playback_start_ns: int | None = None,
-    candidate_offset_ns: int = 0,
 ) -> dict[str, Any]:
-    """Rank simplified DSP hypotheses by normalized FFT-band profile similarity."""
+    """Compare capture band profiles against the configured DSP fingerprint."""
     settings = settings or {}
     sample_rate, samples = _read_wav(Path(audio_path))
     configured_rate = settings.get("sample_rate_hz", sample_rate)
@@ -274,113 +214,188 @@ def compare_to_models(
     frequency_distribution = settings.get("frequency_distribution", 0)
     if frequency_distribution not in (0, 1):
         frequency_distribution = 0
-    reference = _fingerprint(
-        samples,
-        sample_rate,
-        fft_size=configured_fft_size,
-        interpreted_rate=configured_rate,
-        frequency_distribution=frequency_distribution,
+    use_input_filter = bool(settings.get("use_input_filter", False))
+    pink_index = settings.get("pink_index", 0)
+    pink_profile_setting = settings.get("pink_profile")
+    pink_profile_known = pink_index == 0
+    if isinstance(pink_profile_setting, list) and len(pink_profile_setting) == 16 and all(
+        isinstance(value, (int, float)) and value > 0 for value in pink_profile_setting
+    ):
+        pink_profile = [float(value) for value in pink_profile_setting]
+        pink_profile_known = True
+    else:
+        pink_profile = _PINK_PROFILE
+
+    scaling_setting = settings.get("fft_scaling", 3)
+    scaling_modes = {
+        0: 0, 1: 1, 2: 2, 3: 3,
+        "none": 0, "log": 1, "linear": 2, "sqrt": 3,
+    }
+    scaling_mode = scaling_modes.get(scaling_setting, 3)
+    manual_gain = (
+        float(settings.get("sample_gain", 60)) / 40
+        * float(settings.get("input_level", 128)) / 128
+        + 1 / 16
     )
+    agc_enabled = settings.get("agc_mode", 0) not in (0, "off", "none", False)
+    input_level = float(settings.get("input_level", 128))
+    agc_post_gain = input_level / 128
+    if agc_post_gain < 1:
+        agc_post_gain = (agc_post_gain - 1) * 0.8 + 1
+    input_gain = float(settings.get("agc_fft_gain", 1.0)) if agc_enabled else manual_gain
+    average_mode = settings.get("average_mode", "mean")
+    if average_mode not in ("mean", "rms"):
+        average_mode = "mean"
+    window_correction = float(settings.get("window_correction", 1.0))
+    pcm_to_fft_scale = float(settings.get("pcm_to_fft_scale", 1.0))
+    fft_window = settings.get("fft_window")
+    window_supported = fft_window in (
+        0,
+        "blackman_harris",
+        "blackman-harris",
+        "blackmanharris",
+    )
+
+    def fingerprint(**overrides: Any) -> list[float]:
+        options = {
+            "fft_size": configured_fft_size,
+            "interpreted_rate": configured_rate,
+            "frequency_distribution": frequency_distribution,
+            "use_input_filter": use_input_filter,
+            "pink_profile": pink_profile,
+            "window_correction": window_correction,
+            "average_mode": average_mode,
+            "input_gain": input_gain,
+            "scaling": scaling_mode,
+            "agc_post_gain": agc_post_gain if agc_enabled else 1.0,
+            "pcm_to_fft_scale": pcm_to_fft_scale,
+        }
+        options.update(overrides)
+        return _fingerprint(samples, sample_rate, **options)
+
+    reference_model = fingerprint()
     wrong_rate = 18_000 if configured_rate != 18_000 else 22_050
     wrong_fft_size = 256 if configured_fft_size != 256 else 1024
     hypotheses = {
-        "reference_fingerprint": reference,
+        "reference_fingerprint": reference_model,
         "linear_band_split": _fingerprint(
             samples,
             sample_rate,
             fft_size=configured_fft_size,
             mapping="linear_band_split",
             interpreted_rate=configured_rate,
+            pink_profile=pink_profile,
+            window_correction=window_correction,
+            average_mode=average_mode,
+            input_gain=input_gain,
+            scaling=scaling_mode,
+            agc_post_gain=agc_post_gain if agc_enabled else 1.0,
+            pcm_to_fft_scale=pcm_to_fft_scale,
         ),
-        f"wrong_sample_rate_{wrong_rate}_hz": _fingerprint(
-            samples,
-            sample_rate,
-            fft_size=configured_fft_size,
-            interpreted_rate=wrong_rate,
-            frequency_distribution=frequency_distribution,
-        ),
-        f"wrong_fft_size_{wrong_fft_size}": _fingerprint(
-            samples,
-            sample_rate,
-            fft_size=wrong_fft_size,
-            interpreted_rate=configured_rate,
-            frequency_distribution=frequency_distribution,
-        ),
-        "no_pink_correction": _fingerprint(
-            samples,
-            sample_rate,
-            fft_size=configured_fft_size,
-            interpreted_rate=configured_rate,
-            frequency_distribution=frequency_distribution,
-            pink_correction=False,
-        ),
-        "wrong_scaling_linear": _fingerprint(
-            samples,
-            sample_rate,
-            fft_size=configured_fft_size,
-            interpreted_rate=configured_rate,
-            frequency_distribution=frequency_distribution,
-            scaling="linear",
-        ),
-        "wrong_scaling_log": _fingerprint(
-            samples,
-            sample_rate,
-            fft_size=configured_fft_size,
-            interpreted_rate=configured_rate,
-            frequency_distribution=frequency_distribution,
-            scaling="log",
-        ),
-        "wrong_scaling_none": _fingerprint(
-            samples,
-            sample_rate,
-            fft_size=configured_fft_size,
-            interpreted_rate=configured_rate,
-            frequency_distribution=frequency_distribution,
-            scaling="none",
-        ),
+        f"wrong_sample_rate_{wrong_rate}_hz": fingerprint(interpreted_rate=wrong_rate),
+        f"wrong_fft_size_{wrong_fft_size}": fingerprint(fft_size=wrong_fft_size),
+        "no_pink_correction": fingerprint(pink_correction=False),
     }
-    if candidate_packets:
-        levels = [
-            sum(float(packet.fft[band]) for packet in candidate_packets) / len(candidate_packets)
-            for band in range(16)
-        ]
-        total = sum(levels)
-        observed = [value / total for value in levels] if total > 0 else [0.0] * 16
-    else:
-        observed = [0.0] * 16
-    ranked = sorted(
-        (
-            {
-                "model": name,
-                "normalized_profile_mae": sum(abs(expected - actual) for expected, actual in zip(profile, observed)) / 16,
-            }
-            for name, profile in hypotheses.items()
-        ),
-        key=lambda item: item["normalized_profile_mae"],
+    for mutant_name, mutant_scale in (
+        ("wrong_scaling_none", 0),
+        ("wrong_scaling_log", 1),
+        ("wrong_scaling_linear", 2),
+        ("wrong_scaling_sqrt", 3),
+    ):
+        if mutant_scale != scaling_mode:
+            hypotheses[mutant_name] = fingerprint(scaling=mutant_scale)
+
+    reference_ranking = _rank_hypotheses(_observed_profile(reference_packets), hypotheses)
+    candidate_ranking = _rank_hypotheses(_observed_profile(candidate_packets), hypotheses)
+    reference_best = reference_ranking[0]["model"] if reference_ranking else None
+    reference_tied = len(reference_ranking) > 1 and math.isclose(
+        reference_ranking[0]["normalized_profile_mae"],
+        reference_ranking[1]["normalized_profile_mae"],
+        abs_tol=1e-6,
     )
-    closest = ranked[0]["normalized_profile_mae"] if ranked else None
-    tied = [
-        item["model"]
-        for item in ranked
-        if closest is not None and abs(item["normalized_profile_mae"] - closest) <= 1e-6
-    ]
+    unmodeled_settings = []
+    for key in (
+        "sample_rate_hz",
+        "fft_size",
+        "frequency_distribution",
+        "fft_scaling",
+        "average_mode",
+        "sample_gain",
+        "input_level",
+        "agc_mode",
+        "pink_index",
+        "fft_window",
+        "use_input_filter",
+        "dynamics_limiter",
+        "fastpath",
+        "sliding_window",
+        "pcm_to_fft_scale",
+    ):
+        if key not in settings:
+            unmodeled_settings.append(key)
+    if not window_supported:
+        unmodeled_settings.append("non-Blackman-Harris FFT window")
+    if settings.get("use_input_filter") not in (False, 0):
+        unmodeled_settings.append("input filtering")
+    if settings.get("dynamics_limiter") not in (False, 0):
+        unmodeled_settings.append("dynamics limiter")
+    if settings.get("fastpath") not in (False, 0) or settings.get("sliding_window") not in (False, 0, None):
+        unmodeled_settings.append("fast-path smoothing")
+    if agc_enabled:
+        unmodeled_settings.append("AGC dynamics")
+    if scaling_setting not in scaling_modes:
+        unmodeled_settings.append("unknown FFT scaling mode")
+    if not pink_profile_known:
+        unmodeled_settings.append("unknown pink profile")
+    settings_modelable = not unmodeled_settings
+    trustworthy = (
+        settings_modelable
+        and reference_best == "reference_fingerprint"
+        and not reference_tied
+    )
+    candidate_tied = len(candidate_ranking) > 1 and math.isclose(
+        candidate_ranking[0]["normalized_profile_mae"],
+        candidate_ranking[1]["normalized_profile_mae"],
+        abs_tol=1e-6,
+    )
     return {
         "audio_sample_rate_hz": sample_rate,
-        "candidate_settings": settings,
+        "reference_settings": settings,
         "method": "normalized_fft_band_profile_mae",
         "scope": (
-            "diagnostic fingerprint only; simplified Blackman-Harris FFT and default pink profile, "
-            "not a bit-accurate MoonModules reference"
+            "diagnostic approximation; Blackman-Harris window, GEQ map, averaging and documented output scaling; "
+            "does not model input filtering, AGC dynamics, limiter state, or fast-path smoothing"
         ),
-        "best_match": ranked[0]["model"] if ranked and len(tied) == 1 else None,
-        "ambiguous_best_match": len(tied) != 1,
-        "ranked_hypotheses": ranked,
-        "stateful_mutant_scores": _stateful_mutant_scores(
-            samples,
-            sample_rate,
-            configured_fft_size,
-            candidate_packets,
-            playback_start_ns,
-            candidate_offset_ns,
-        ),
+        "reference_capture_ranking": {
+            "best_match": reference_best,
+            "ranking_is_trustworthy": trustworthy,
+            "ranked_hypotheses": reference_ranking,
+            "reason": (
+                None
+                if trustworthy
+                else "reference capture does not validate the model assumptions"
+            ),
+        },
+        "candidate_capture_ranking": {
+            "best_match": (
+                candidate_ranking[0]["model"]
+                if trustworthy and candidate_ranking and not candidate_tied
+                else None
+            ),
+            "ambiguous_best_match": candidate_tied,
+            "ranked_hypotheses": candidate_ranking,
+            "ranking_is_trustworthy": trustworthy,
+        },
+        "configuration_known": {
+            "pink_profile": pink_profile_known,
+            "fft_scaling": scaling_setting in scaling_modes,
+            "average_mode": "average_mode" in settings,
+            "window_correction": window_correction,
+            "fft_window_supported": window_supported,
+            "input_gain": input_gain,
+            "pcm_to_fft_scale": pcm_to_fft_scale,
+            "agc_fft_gain": "agc_fft_gain" in settings if agc_enabled else None,
+            "unmodeled_settings": unmodeled_settings,
+        },
+        "temporal_behavior_hypotheses": "not ranked; behavior scores are not validated against the reference capture",
     }

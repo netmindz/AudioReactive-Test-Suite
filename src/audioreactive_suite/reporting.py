@@ -19,13 +19,21 @@ def render_summary(report: dict[str, Any]) -> str:
     scorecard = report.get("scorecard", {})
     if scorecard:
         shape = scorecard.get("mean_shape_correlation")
-        level = scorecard.get("mean_absolute_level_error_db")
+        level = scorecard.get("mean_absolute_output_value_ratio_error")
         shape_text = f"{shape:.3f}" if isinstance(shape, (int, float)) else "n/a"
-        level_text = f"{level:.2f} dB" if isinstance(level, (int, float)) else "n/a"
-        lines.append(f"Band scorecard: mean temporal shape correlation {shape_text}; mean absolute level error {level_text}")
+        level_text = f"{level:.3f} ratio error" if isinstance(level, (int, float)) else "n/a"
+        lines.append(
+            f"Band scorecard: mean temporal shape correlation {shape_text}; "
+            f"mean output-value ratio error {level_text} (level check: {scorecard.get('level_check', 'not calibrated')})"
+        )
     model = report.get("reference_model")
-    if isinstance(model, dict) and model.get("best_match"):
-        lines.append(f"Closest simplified DSP fingerprint: {model['best_match']}")
+    if isinstance(model, dict):
+        baseline = model.get("reference_capture_ranking", {})
+        candidate = model.get("candidate_capture_ranking", {})
+        if baseline.get("ranking_is_trustworthy") and candidate.get("best_match"):
+            lines.append(f"Closest simplified DSP fingerprint: {candidate['best_match']}")
+        elif baseline:
+            lines.append("DSP fingerprint ranking is untrusted: the reference capture did not validate the model.")
     if report["validity_errors"]:
         lines.extend(["", "Invalid or inconclusive evidence:"])
         lines.extend(f"- {error}" for error in report["validity_errors"])

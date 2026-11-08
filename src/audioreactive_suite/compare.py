@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .capture import load_capture
+from .bands import geq_bands
 from .model import compare_to_models
 from .packet import DecodedPacket, decode_packet
 
@@ -28,8 +29,10 @@ def load_case(path: str | Path) -> dict[str, Any]:
         raise ValueError("case requires a string id")
     if case.get("schema_version", 1) != 1:
         raise ValueError("unsupported case schema")
-    if not isinstance(case.get("thresholds"), dict) or not case["thresholds"]:
-        raise ValueError("case requires at least one threshold")
+    if not isinstance(case.get("thresholds"), dict):
+        raise ValueError("case thresholds must be an object")
+    if not case["thresholds"] and not case.get("shape_thresholds") and not case.get("level_thresholds"):
+        raise ValueError("case requires at least one raw, shape, or level threshold")
     if not isinstance(case.get("required_settings", []), list) or not all(
         isinstance(setting, str) and setting for setting in case.get("required_settings", [])
     ):
@@ -297,7 +300,9 @@ def _field_metrics(
     }
 
 
-def _band_shape_level(pairs: list[tuple[DecodedPacket, DecodedPacket]]) -> dict[str, Any]:
+def _band_shape_level(
+    pairs: list[tuple[DecodedPacket, DecodedPacket]], stimulus_type: str | None
+) -> dict[str, Any]:
     if not pairs:
         return {"bands": {}, "summary": {}}
     reference_profile = [
@@ -310,21 +315,23 @@ def _band_shape_level(pairs: list[tuple[DecodedPacket, DecodedPacket]]) -> dict[
     candidate_total = sum(candidate_profile)
     band_metrics: dict[str, Any] = {}
     correlations: list[float] = []
-    level_errors: list[float] = []
+    ratio_errors: list[float] = []
     profile_errors: list[float] = []
+    dynamic_stimulus = stimulus_type in {
+        "amplitude_modulation",
+        "level_steps",
+        "logarithmic_sweep",
+        "click_train",
+    }
     for band in range(16):
         reference_values = [reference.fft[band] for reference, _ in pairs]
         candidate_values = [candidate.fft[band] for _, candidate in pairs]
-        correlation = _correlation(reference_values, candidate_values)
+        correlation = _correlation(reference_values, candidate_values) if dynamic_stimulus else None
         if correlation is not None:
             correlations.append(correlation)
         reference_level = reference_profile[band]
         candidate_level = candidate_profile[band]
-        level_ratio_db = (
-            20 * math.log10(candidate_level / reference_level)
-            if candidate_level > 0 and reference_level > 0
-            else None
-        )
+        output_value_ratio = candidate_level / reference_level if reference_level > 0 else None
         reference_share = reference_level / reference_total if reference_total > 0 else None
         candidate_share = candidate_level / candidate_total if candidate_total > 0 else None
         profile_error = (
@@ -332,13 +339,13 @@ def _band_shape_level(pairs: list[tuple[DecodedPacket, DecodedPacket]]) -> dict[
             if candidate_share is not None and reference_share is not None
             else None
         )
-        if level_ratio_db is not None:
-            level_errors.append(abs(level_ratio_db))
+        if output_value_ratio is not None:
+            ratio_errors.append(abs(output_value_ratio - 1))
         if profile_error is not None:
             profile_errors.append(profile_error)
         band_metrics[str(band)] = {
             "shape_correlation": correlation,
-            "level_ratio_db": level_ratio_db,
+            "output_value_ratio": output_value_ratio,
             "reference_profile_share": reference_share,
             "candidate_profile_share": candidate_share,
             "normalized_profile_error": profile_error,
@@ -347,8 +354,12 @@ def _band_shape_level(pairs: list[tuple[DecodedPacket, DecodedPacket]]) -> dict[
         "bands": band_metrics,
         "summary": {
             "mean_shape_correlation": sum(correlations) / len(correlations) if correlations else None,
-            "mean_absolute_level_error_db": sum(level_errors) / len(level_errors) if level_errors else None,
+            "mean_absolute_output_value_ratio_error": (
+                sum(ratio_errors) / len(ratio_errors) if ratio_errors else None
+            ),
             "normalized_profile_mae": sum(profile_errors) / len(profile_errors) if profile_errors else None,
+            "temporal_correlation_applicable": dynamic_stimulus,
+            "level_check": "not_calibrated",
             "interpretation": "shape separates temporal/profile agreement from overall gain or input-level differences",
         },
     }
@@ -433,15 +444,14 @@ def _diagnostics(
             sample_rate = reference_settings.get("sample_rate_hz", 22_050)
             fft_size = reference_settings.get("fft_size", 512)
             frequency_bin = round(stimulus["frequency_hz"] * fft_size / sample_rate)
-            frequency_distribution = reference_settings.get("frequency_distribution", 0)
-            ranges = (
-                [(1, 1), (2, 2), (3, 3), (4, 4), (5, 6), (7, 8), (9, 10), (11, 13),
-                 (14, 18), (19, 25), (26, 36), (37, 45), (46, 66), (67, 97), (98, 164), (165, 215)]
-                if frequency_distribution == 1
-                else [(1, 1), (2, 2), (3, 4), (5, 6), (7, 9), (10, 12), (13, 18), (19, 25),
-                      (26, 32), (33, 43), (44, 55), (56, 69), (70, 85), (86, 103), (104, 164), (165, 215)]
+            ranges = geq_bands(
+                reference_settings.get("frequency_distribution", 0),
+                bool(reference_settings.get("use_input_filter", False)),
             )
-            expected_band = next((band for band, (low, high) in enumerate(ranges) if low <= frequency_bin <= high), None)
+            expected_band = next(
+                (band for band, (low, high, _) in enumerate(ranges) if low <= frequency_bin <= high),
+                None,
+            )
             reference_peak = max(range(16), key=lambda band: sum(pair[0].fft[band] for pair in pairs)) if pairs else None
             candidate_peak = max(range(16), key=lambda band: sum(pair[1].fft[band] for pair in pairs)) if pairs else None
             hints.append(
@@ -458,7 +468,7 @@ def _diagnostics(
             reference_levels = [sum(pair[0].fft[band] for pair in pairs) / len(pairs) for band in range(16)]
             candidate_levels = [sum(pair[1].fft[band] for pair in pairs) / len(pairs) for band in range(16)]
             def slope(values: list[float]) -> float | None:
-                points = [(band, 20 * math.log10(value)) for band, value in enumerate(values) if value > 0]
+                points = [(band, math.log10(value)) for band, value in enumerate(values) if value > 0]
                 if len(points) < 2:
                     return None
                 mean_x = sum(point[0] for point in points) / len(points)
@@ -471,7 +481,10 @@ def _diagnostics(
                 hints.append(
                     {
                         "category": "noise_band_profile",
-                        "evidence": f"band-profile slope reference/candidate: {reference_slope:.2f}/{candidate_slope:.2f} dB per band",
+                        "evidence": (
+                            "log10 output-value profile slope reference/candidate: "
+                            f"{reference_slope:.3f}/{candidate_slope:.3f} per band"
+                        ),
                         "hint": "A slope difference points to pink correction, microphone profile or frequency-dependent scaling.",
                     }
                 )
@@ -577,6 +590,43 @@ def _threshold_failures(metrics: dict[str, dict[str, float | int]], thresholds: 
                 failures.append(
                     {"field": field, "statistic": statistic, "observed": observed, "maximum": maximum}
                 )
+    return failures
+
+
+def _shape_threshold_failures(scorecard: dict[str, Any], thresholds: dict[str, Any]) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+    for metric, maximum in thresholds.items():
+        if metric == "minimum_shape_correlation":
+            observed = scorecard.get("mean_shape_correlation")
+            if not isinstance(maximum, (int, float)) or observed is None:
+                failures.append(
+                    {"field": "shape", "statistic": metric, "reason": "temporal correlation is unavailable"}
+                )
+            elif observed < maximum:
+                failures.append(
+                    {"field": "shape", "statistic": metric, "observed": observed, "minimum": maximum}
+                )
+            continue
+        observed = scorecard.get(metric)
+        if not isinstance(maximum, (int, float)) or observed is None:
+            failures.append({"field": "shape", "statistic": metric, "reason": "shape metric is unavailable"})
+        elif observed > maximum:
+            failures.append(
+                {"field": "shape", "statistic": metric, "observed": observed, "maximum": maximum}
+            )
+    return failures
+
+
+def _level_threshold_failures(scorecard: dict[str, Any], thresholds: dict[str, Any]) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+    for metric, maximum in thresholds.items():
+        observed = scorecard.get(metric)
+        if not isinstance(maximum, (int, float)) or observed is None:
+            failures.append({"field": "level", "statistic": metric, "reason": "level metric is unavailable"})
+        elif observed > maximum:
+            failures.append(
+                {"field": "level", "statistic": metric, "observed": observed, "maximum": maximum}
+            )
     return failures
 
 
@@ -693,7 +743,15 @@ def compare(reference_path: str | Path, candidate_path: str | Path, case_path: s
         reference_window, candidate_window, offset_ns, int(peak_tolerance_ms * 1_000_000)
     )
 
-    band_shape_level = _band_shape_level(pairs)
+    band_shape_level = _band_shape_level(pairs, stimulus.get("type"))
+    scorecard = dict(band_shape_level["summary"])
+    level_thresholds = case.get("level_thresholds", {})
+    shape_thresholds = case.get("shape_thresholds", {})
+    if not isinstance(level_thresholds, dict) or not isinstance(shape_thresholds, dict):
+        raise ValueError("shape_thresholds and level_thresholds must be objects")
+    scorecard["level_check"] = (
+        "thresholded" if level_thresholds else "not_calibrated"
+    )
     reference_model = None
     audio_file = stimulus.get("audio_file")
     if isinstance(audio_file, str):
@@ -702,14 +760,17 @@ def compare(reference_path: str | Path, candidate_path: str | Path, case_path: s
             try:
                 reference_model = compare_to_models(
                     audio_path,
+                    reference_window,
                     candidate_window,
                     reference_artifact["metadata"].get("settings", {}),
-                    playback_start,
-                    offset_ns,
                 )
-            except (OSError, ValueError, wave.Error) as error:
+            except (OSError, TypeError, ValueError, wave.Error) as error:
                 reference_model = {"error": str(error)}
-    failures = [] if validity_errors else _threshold_failures(metrics, case["thresholds"])
+    failures = [] if validity_errors else (
+        _threshold_failures(metrics, case["thresholds"])
+        + _shape_threshold_failures(scorecard, shape_thresholds)
+        + _level_threshold_failures(scorecard, level_thresholds)
+    )
     verdict = "inconclusive" if validity_errors else "threshold_failure" if failures else "pass"
     exit_code = EXIT_INCONCLUSIVE if validity_errors else EXIT_THRESHOLD_FAILURE if failures else EXIT_PASS
     report = {
@@ -747,7 +808,7 @@ def compare(reference_path: str | Path, candidate_path: str | Path, case_path: s
         "peak_matching": {"tolerance_ms": peak_tolerance_ms},
         "metrics": metrics,
         "band_shape_level": band_shape_level["bands"],
-        "scorecard": band_shape_level["summary"],
+        "scorecard": scorecard,
         "reference_model": reference_model,
         "window_metrics": _windowed_metrics(pairs, case, window_origin),
         "validity_errors": validity_errors,

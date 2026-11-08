@@ -14,8 +14,9 @@ from pathlib import Path
 from audioreactive_suite.cli import main
 from audioreactive_suite.compare import EXIT_INCONCLUSIVE, EXIT_PASS, EXIT_THRESHOLD_FAILURE, compare
 from audioreactive_suite.capture import capture_udp
+from audioreactive_suite.bands import geq_bands
 from audioreactive_suite.execution import run_case
-from audioreactive_suite.model import _fingerprint, _read_wav, compare_to_models
+from audioreactive_suite.model import _fingerprint, _read_wav, _scale_fft_value, compare_to_models
 from audioreactive_suite.packet import decode_packet
 from audioreactive_suite.stimuli import SAMPLE_RATE_HZ, create_sample_set
 
@@ -124,20 +125,70 @@ class StimulusTests(unittest.TestCase):
             sample_rate, samples = _read_wav(audio)
             profile = _fingerprint(samples, sample_rate, pink_correction=False)
             fft = tuple(round(value * 255) for value in profile)
-            packet = decode_packet(audio_sync_packet(1, "10.0.0.1:11988", fft=fft))
+            candidate_packet = decode_packet(audio_sync_packet(1, "10.0.0.2:11988", fft=fft))
+            reference_profile = _fingerprint(samples, sample_rate)
+            reference_packet = decode_packet(
+                audio_sync_packet(
+                    1,
+                    "10.0.0.1:11988",
+                    fft=tuple(round(value * 255) for value in reference_profile),
+                )
+            )
+            settings = {
+                "sample_rate_hz": sample_rate,
+                "fft_size": 512,
+                "frequency_distribution": 0,
+                "fft_scaling": "sqrt",
+                "pink_index": 0,
+                "average_mode": "mean",
+            }
 
-            result = compare_to_models(audio, [packet], playback_start_ns=1)
+            result = compare_to_models(audio, [reference_packet], [candidate_packet], settings)
 
-        self.assertEqual(result["best_match"], "no_pink_correction")
-        self.assertIn("linear_band_split", [item["model"] for item in result["ranked_hypotheses"]])
-        self.assertIn("wrong_fft_size_256", [item["model"] for item in result["ranked_hypotheses"]])
-        self.assertIn("wrong_scaling_none", [item["model"] for item in result["ranked_hypotheses"]])
-        self.assertTrue(result["stateful_mutant_scores"]["available"])
-        self.assertIn(
-            "volume_spike_peak_detector",
-            [item["model"] for item in result["stateful_mutant_scores"]["ranked_hypotheses"]],
+        self.assertEqual(
+            result["reference_capture_ranking"]["best_match"], "reference_fingerprint"
         )
-        self.assertEqual(result["scope"].split(";")[0], "diagnostic fingerprint only")
+        self.assertFalse(result["reference_capture_ranking"]["ranking_is_trustworthy"])
+        self.assertIsNone(result["candidate_capture_ranking"]["best_match"])
+        self.assertIn("does not validate", result["reference_capture_ranking"]["reason"])
+        self.assertIn("not ranked", result["temporal_behavior_hypotheses"])
+        self.assertIn(
+            "linear_band_split",
+            [item["model"] for item in result["candidate_capture_ranking"]["ranked_hypotheses"]],
+        )
+        self.assertIn("diagnostic approximation", result["scope"])
+
+    def test_reference_model_gates_candidate_ranking_when_baseline_disagrees(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            create_sample_set(directory)
+            audio = Path(directory) / "tone_688hz.wav"
+            packets = [
+                decode_packet(audio_sync_packet(1 + index, "10.0.0.1:11988"))
+                for index in range(3)
+            ]
+            result = compare_to_models(
+                audio,
+                packets,
+                packets,
+                {"pink_index": 1, "fft_scaling": "sqrt", "average_mode": "mean"},
+            )
+
+        self.assertFalse(result["reference_capture_ranking"]["ranking_is_trustworthy"])
+        self.assertIsNone(result["candidate_capture_ranking"]["best_match"])
+        self.assertIn("does not validate", result["reference_capture_ranking"]["reason"])
+
+    def test_documented_square_root_scaling_example_rounds_to_byte_79(self) -> None:
+        self.assertEqual(_scale_fft_value(106.25, 0, 3), 79)
+        self.assertNotEqual(
+            _scale_fft_value(106.25, 0, 2),
+            _scale_fft_value(106.25, 0, 0),
+        )
+
+    def test_shared_band_maps_include_input_filter_variants(self) -> None:
+        self.assertEqual(geq_bands(0, True)[0], (3, 3, 0.8))
+        self.assertEqual(geq_bands(0, True)[15], (165, 205, 0.75))
+        self.assertEqual(geq_bands(1, True)[0], (1, 1, 0.8))
+        self.assertEqual(geq_bands(1, True)[15], (165, 205, 0.75))
 
 
 class ComparisonTests(unittest.TestCase):
@@ -314,8 +365,41 @@ class ComparisonTests(unittest.TestCase):
 
         report, _ = compare(self.reference, self.candidate, self.case)
 
-        self.assertEqual(report["band_shape_level"]["0"]["level_ratio_db"], 20 * math.log10(2))
+        self.assertEqual(report["band_shape_level"]["1"]["output_value_ratio"], 2)
         self.assertEqual(report["scorecard"]["normalized_profile_mae"], 0)
+        self.assertIsNone(report["band_shape_level"]["1"]["shape_correlation"])
+        self.assertEqual(report["scorecard"]["level_check"], "not_calibrated")
+
+    def test_shape_threshold_verdict_is_independent_of_uncalibrated_level(self) -> None:
+        reference_packets = [
+            audio_sync_packet(1_000_000_000 + index * 20_000_000, "10.0.0.1:11988", fft=(10,) * 16)
+            for index in range(4)
+        ]
+        candidate_packets = [
+            audio_sync_packet(1_000_000_000 + index * 20_000_000, "10.0.0.2:11988", fft=(20,) * 16)
+            for index in range(4)
+        ]
+        write_capture(self.reference, "reference", reference_packets)
+        write_capture(self.candidate, "candidate", candidate_packets)
+        write_case(
+            self.case,
+            thresholds={},
+            shape_thresholds={"normalized_profile_mae": 0.01},
+        )
+
+        report, exit_code = compare(self.reference, self.candidate, self.case)
+
+        self.assertEqual(exit_code, EXIT_PASS, report)
+        self.assertEqual(report["scorecard"]["level_check"], "not_calibrated")
+        write_case(
+            self.case,
+            thresholds={},
+            shape_thresholds={"normalized_profile_mae": 0.01},
+            level_thresholds={"mean_absolute_output_value_ratio_error": 0.1},
+        )
+        report, exit_code = compare(self.reference, self.candidate, self.case)
+        self.assertEqual(exit_code, EXIT_THRESHOLD_FAILURE)
+        self.assertEqual(report["threshold_failures"][0]["field"], "level")
 
     def test_tone_diagnostic_reports_expected_and_observed_bands(self) -> None:
         reference_fft = [0] * 16

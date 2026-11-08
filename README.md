@@ -79,16 +79,27 @@ Cases estimate candidate latency using envelope correlation when their
 search range and ambiguity decision. An ambiguous estimate makes the result
 inconclusive. The `stimulus.warmup_seconds` and `measurement_seconds` fields
 select the score window relative to the recorded playback start, not the first
-received packet.
+received packet. The offset search range is case-configurable; supplied cases
+search ±1 second. A calibration preamble is not injected, to keep each WAV's
+declared stimulus unchanged.
 
 The report separates per-band temporal shape correlation and normalized profile
-error from level ratio in dB. When a case references an audio fixture, it also
-ranks simplified FFT-band fingerprints (including mapping, sample-rate, FFT-size,
-pink-correction and scaling variants) and reports temporal hypotheses for
-magnitude-as-amplitude, volume-spike peak detection and disabled AGC. This is a
-diagnostic approximation, not a bit-accurate or hardware-validated MoonModules
-reference; tied or unmatched fingerprints should not be treated as proof of a
-specific implementation bug.
+error from the ratio of candidate to reference output byte values; this ratio is
+not physical dB. Shape thresholds can be configured under `shape_thresholds`.
+Level thresholds are optional under `level_thresholds`; without calibration, the
+level check is reported as `not_calibrated` and does not affect the verdict.
+Temporal correlations are reported only for dynamic stimuli (modulation, steps,
+sweep and clicks).
+
+When a case references an audio fixture, the report ranks DSP fingerprint
+hypotheses for both the hardware reference and candidate. The candidate ranking
+is withheld unless the reference capture uniquely validates the configured
+fingerprint. The model includes the documented GEQ maps, bin averaging, divide
+by 16, profile/downscale/gain stages and MoonModules scaling transfer functions,
+including channel-dependent factors. It remains a diagnostic approximation: it
+does not model input filtering, AGC dynamics, limiter state, or fast-path
+smoothing. Behavior mutants are not ranked because their scores are not
+validated against the reference capture.
 
 Cases cover tone, sweep, clicks, multi-tone, amplitude modulation, stepped levels,
 and seeded white/pink noise. Unknown or mismatched required settings,
