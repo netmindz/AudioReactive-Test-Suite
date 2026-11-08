@@ -70,6 +70,50 @@ def write_case(path: Path, **overrides: object) -> None:
     path.write_text(json.dumps(case), encoding="utf-8")
 
 
+def model_reference_settings(sample_rate: int) -> dict[str, object]:
+    return {
+        "sample_rate_hz": sample_rate,
+        "fft_size": 512,
+        "frequency_distribution": 0,
+        "fft_scaling": 3,
+        "sample_gain": 60,
+        "input_level": 128,
+        "agc_mode": 0,
+        "pink_index": 0,
+        "fft_window": 0,
+        "average_mode": "mean",
+        "use_input_filter": 0,
+        "dynamics_limiter": 0,
+        "fastpath": 0,
+        "sliding_window": 0,
+        "pcm_to_fft_scale": 64,
+    }
+
+
+def model_capture_packet(
+    samples: list[float], sample_rate: int, source: str, **overrides: object
+) -> object:
+    options = {
+        "fft_size": 512,
+        "interpreted_rate": sample_rate,
+        "frequency_distribution": 0,
+        "scaling": 3,
+        "input_gain": 1.5625,
+        "pcm_to_fft_scale": 64,
+        "frame_stride": 4,
+        "normalize_output": False,
+    }
+    options.update(overrides)
+    levels = _fingerprint(
+        samples,
+        sample_rate,
+        **options,
+    )
+    return decode_packet(
+        audio_sync_packet(1, source, fft=tuple(round(value) for value in levels))
+    )
+
+
 class PacketTests(unittest.TestCase):
     def test_decodes_strict_v2_packet(self) -> None:
         decoded = decode_packet(audio_sync_packet(1, "127.0.0.1:11988", peak=True))
@@ -123,41 +167,142 @@ class StimulusTests(unittest.TestCase):
             create_sample_set(directory)
             audio = Path(directory) / "pink_noise_seed_20261108.wav"
             sample_rate, samples = _read_wav(audio)
-            profile = _fingerprint(samples, sample_rate, pink_correction=False, pcm_to_fft_scale=64)
-            fft = tuple(round(value * 255) for value in profile)
-            candidate_packet = decode_packet(audio_sync_packet(1, "10.0.0.2:11988", fft=fft))
-            reference_profile = _fingerprint(samples, sample_rate, pcm_to_fft_scale=64)
-            reference_packet = decode_packet(
-                audio_sync_packet(
-                    1,
-                    "10.0.0.1:11988",
-                    fft=tuple(round(value * 255) for value in reference_profile),
-                )
+            samples = samples[:sample_rate]
+            reference_packet = model_capture_packet(samples, sample_rate, "10.0.0.1:11988")
+            candidate_packet = model_capture_packet(
+                samples, sample_rate, "10.0.0.2:11988", pink_correction=False
             )
-            settings = {
-                "sample_rate_hz": sample_rate,
-                "fft_size": 512,
-                "frequency_distribution": 0,
-                "fft_scaling": "sqrt",
-                "pink_index": 0,
-                "average_mode": "mean",
-                "pcm_to_fft_scale": 64,
-            }
+            result = compare_to_models(
+                audio,
+                [reference_packet],
+                [candidate_packet],
+                model_reference_settings(sample_rate),
+                audio_duration_seconds=1,
+            )
 
-            result = compare_to_models(audio, [reference_packet], [candidate_packet], settings)
-
-        self.assertEqual(
-            result["reference_capture_ranking"]["best_match"], "reference_fingerprint"
-        )
-        self.assertFalse(result["reference_capture_ranking"]["ranking_is_trustworthy"])
-        self.assertIsNone(result["candidate_capture_ranking"]["best_match"])
-        self.assertIn("does not validate", result["reference_capture_ranking"]["reason"])
+        self.assertEqual(result["reference_capture_ranking"]["best_match"], "reference_fingerprint")
+        self.assertTrue(result["reference_capture_ranking"]["ranking_is_trustworthy"])
+        self.assertEqual(result["candidate_capture_ranking"]["best_match"], "no_pink_correction")
         self.assertIn("not ranked", result["temporal_behavior_hypotheses"])
         self.assertIn(
             "linear_band_split",
             [item["model"] for item in result["candidate_capture_ranking"]["ranked_hypotheses"]],
         )
         self.assertIn("diagnostic approximation", result["scope"])
+
+    def test_reference_model_trusts_self_consistent_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            create_sample_set(directory)
+            audio = Path(directory) / "pink_noise_seed_20261108.wav"
+            sample_rate, samples = _read_wav(audio)
+            reference_packet = model_capture_packet(
+                samples[:sample_rate], sample_rate, "10.0.0.1:11988"
+            )
+            result = compare_to_models(
+                audio,
+                [reference_packet],
+                [reference_packet],
+                model_reference_settings(sample_rate),
+                audio_duration_seconds=1,
+            )
+
+        self.assertTrue(result["reference_capture_ranking"]["ranking_is_trustworthy"])
+        self.assertEqual(result["reference_capture_ranking"]["best_match"], "reference_fingerprint")
+        self.assertEqual(result["candidate_capture_ranking"]["best_match"], "reference_fingerprint")
+
+    def test_candidate_sample_rate_and_mapping_mutants_rank_correctly(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            create_sample_set(directory)
+            audio = Path(directory) / "pink_noise_seed_20261108.wav"
+            sample_rate, samples = _read_wav(audio)
+            samples = samples[:sample_rate]
+            reference_packet = model_capture_packet(samples, sample_rate, "10.0.0.1:11988")
+            mutants = (
+                ("wrong_sample_rate_18000_hz", {"interpreted_rate": 18_000}),
+                ("no_pink_correction", {"pink_correction": False, "pcm_to_fft_scale": 200}),
+                ("linear_band_split", {"mapping": "linear_band_split"}),
+            )
+            for expected, options in mutants:
+                candidate_packet = model_capture_packet(
+                    samples, sample_rate, "10.0.0.2:11988", **options
+                )
+                result = compare_to_models(
+                    audio,
+                    [reference_packet],
+                    [candidate_packet],
+                    model_reference_settings(sample_rate),
+                    audio_duration_seconds=1,
+                )
+                self.assertTrue(result["reference_capture_ranking"]["ranking_is_trustworthy"])
+                self.assertEqual(
+                    result["candidate_capture_ranking"]["best_match"],
+                    expected,
+                    result["candidate_capture_ranking"]["ranked_hypotheses"],
+                )
+
+    def test_every_model_mutant_has_a_distinct_pink_noise_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            create_sample_set(directory)
+            sample_rate, samples = _read_wav(
+                Path(directory) / "pink_noise_seed_20261108.wav"
+            )
+            samples = samples[:sample_rate]
+            baseline = _fingerprint(
+                samples,
+                sample_rate,
+                interpreted_rate=sample_rate,
+                input_gain=1.5625,
+                pcm_to_fft_scale=64,
+                frame_stride=4,
+            )
+            mutants = (
+                {"mapping": "linear_band_split"},
+                {"interpreted_rate": 18_000},
+                {"fft_size": 256},
+                {"pink_correction": False},
+                {"scaling": 0},
+                {"scaling": 1},
+                {"scaling": 2},
+            )
+            for options in mutants:
+                with self.subTest(mutant=options):
+                    fingerprint_options = {
+                        "interpreted_rate": sample_rate,
+                        "input_gain": 1.5625,
+                        "pcm_to_fft_scale": 64,
+                        "frame_stride": 4,
+                    }
+                    fingerprint_options.update(options)
+                    mutant = _fingerprint(
+                        samples,
+                        sample_rate,
+                        **fingerprint_options,
+                    )
+                    self.assertGreater(sum(abs(a - b) for a, b in zip(baseline, mutant)), 1e-3)
+
+    def test_correct_fingerprint_ranks_at_twice_the_reference_level(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            create_sample_set(directory)
+            audio = Path(directory) / "pink_noise_seed_20261108.wav"
+            sample_rate, samples = _read_wav(audio)
+            samples = samples[:sample_rate]
+            reference_packet = model_capture_packet(samples, sample_rate, "10.0.0.1:11988")
+            candidate_packet = model_capture_packet(
+                samples, sample_rate, "10.0.0.2:11988", pcm_to_fft_scale=128
+            )
+            result = compare_to_models(
+                audio,
+                [reference_packet],
+                [candidate_packet],
+                model_reference_settings(sample_rate),
+                audio_duration_seconds=1,
+            )
+
+        self.assertEqual(result["candidate_capture_ranking"]["best_match"], "reference_fingerprint")
+        self.assertGreater(
+            result["input_scale_fit"]["candidate_capture"]["reference_fingerprint"]["pcm_to_fft_scale"],
+            result["input_scale_fit"]["reference_capture"]["reference_fingerprint"]["pcm_to_fft_scale"],
+        )
 
     def test_reference_model_fits_input_scale_and_gain(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -176,9 +321,10 @@ class StimulusTests(unittest.TestCase):
                 {"fft_size": 512, "fft_scaling": "sqrt", "pcm_to_fft_scale": 1},
             )
 
-        self.assertEqual(result["input_scale_fit"]["status"], "fitted")
-        self.assertGreater(result["input_scale_fit"]["pcm_to_fft_scale"], 1)
-        self.assertGreater(result["input_scale_fit"]["input_gain"], 1)
+        reference_fit = result["input_scale_fit"]["reference_capture"]["reference_fingerprint"]
+        self.assertEqual(reference_fit["status"], "fitted")
+        self.assertGreater(reference_fit["pcm_to_fft_scale"], 1)
+        self.assertGreater(reference_fit["input_gain"], 1)
         self.assertNotEqual(result["reference_capture_ranking"]["status"], "degenerate")
         self.assertNotIn("pcm_to_fft_scale", result["configuration_known"]["unmodeled_settings"])
 
