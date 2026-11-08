@@ -31,7 +31,7 @@
     }
   },
   "shape_thresholds": {
-    "normalized_profile_mae": 0.15,
+    "total_variation": 0.15,
     "minimum_shape_correlation": 0.7
   }
 }
