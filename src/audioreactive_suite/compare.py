@@ -137,6 +137,8 @@ def _interpolate_at(
             return packets[-1]
         return None
     before, after = packets[index - 1], packets[index]
+    if after.timestamp_ns == before.timestamp_ns:
+        return before
     if maximum_gap_ns is not None and after.timestamp_ns - before.timestamp_ns > maximum_gap_ns:
         return None
     fraction = (timestamp_ns - before.timestamp_ns) / (after.timestamp_ns - before.timestamp_ns)
@@ -159,12 +161,11 @@ def _interpolate_at(
     )
 
 
-def _interpolate(packets: list[DecodedPacket], timestamp_ns: int) -> DecodedPacket | None:
-    return _interpolate_at(packets, [packet.timestamp_ns for packet in packets], timestamp_ns)
-
-
 def _time_pairs(
-    reference: list[DecodedPacket], candidate: list[DecodedPacket], offset_ns: int
+    reference: list[DecodedPacket],
+    candidate: list[DecodedPacket],
+    offset_ns: int,
+    maximum_distance_ns: int,
 ) -> list[tuple[DecodedPacket, DecodedPacket]]:
     if len(candidate) < 2:
         return []
@@ -172,7 +173,7 @@ def _time_pairs(
     median_interval = statistics.median(
         right.timestamp_ns - left.timestamp_ns for left, right in zip(candidate, candidate[1:])
     )
-    maximum_gap_ns = int(median_interval * 3)
+    maximum_gap_ns = min(int(median_interval * 3), max(1, maximum_distance_ns * 2))
     pairs = []
     for ref_packet in reference:
         candidate_packet = _interpolate_at(
@@ -235,6 +236,8 @@ def _estimate_offset(
                 if ref_packet is not None and candidate_packet is not None:
                     ref_values.append(float(extractor(ref_packet)))
                     candidate_values.append(float(extractor(candidate_packet)))
+            if len(ref_values) < max(5, len(grid) // 4):
+                continue
             correlation = _correlation(ref_values, candidate_values)
             if correlation is not None:
                 correlations.append(correlation)
@@ -246,8 +249,8 @@ def _estimate_offset(
     alternatives = [
         score for score, offset, _ in scores if abs(offset - best_offset) > exclusion_ns and score >= 0
     ]
-    runner_up = max(alternatives, default=-1.0)
-    margin = best_score - runner_up if runner_up >= 0 else 0.0
+    runner_up = max(alternatives, default=0.0)
+    margin = best_score - runner_up
     ambiguous = dimensions == 0 or best_score < 0.35 or margin < 0.015
     return best_offset, {
         "method": "envelope_cross_correlation",
@@ -423,13 +426,21 @@ def _diagnostics(
     failed_bands = [field for field in failed_fields if field.startswith("fft.")]
     stimulus = case.get("stimulus", {})
     stimulus_type = stimulus.get("type") if isinstance(stimulus, dict) else None
-    if failed_bands:
+    if failed_bands or (
+        stimulus_type == "logarithmic_sweep" and "dominant_frequency" in failed_fields
+    ):
         if stimulus_type == "tone" and isinstance(stimulus.get("frequency_hz"), (int, float)):
             sample_rate = reference_settings.get("sample_rate_hz", 22_050)
             fft_size = reference_settings.get("fft_size", 512)
             frequency_bin = round(stimulus["frequency_hz"] * fft_size / sample_rate)
-            ranges = [(1, 1), (2, 2), (3, 4), (5, 6), (7, 9), (10, 12), (13, 18), (19, 25),
+            frequency_distribution = reference_settings.get("frequency_distribution", 0)
+            ranges = (
+                [(1, 1), (2, 2), (3, 3), (4, 4), (5, 6), (7, 8), (9, 10), (11, 13),
+                 (14, 18), (19, 25), (26, 36), (37, 45), (46, 66), (67, 97), (98, 164), (165, 215)]
+                if frequency_distribution == 1
+                else [(1, 1), (2, 2), (3, 4), (5, 6), (7, 9), (10, 12), (13, 18), (19, 25),
                       (26, 32), (33, 43), (44, 55), (56, 69), (70, 85), (86, 103), (104, 164), (165, 215)]
+            )
             expected_band = next((band for band, (low, high) in enumerate(ranges) if low <= frequency_bin <= high), None)
             reference_peak = max(range(16), key=lambda band: sum(pair[0].fft[band] for pair in pairs)) if pairs else None
             candidate_peak = max(range(16), key=lambda band: sum(pair[1].fft[band] for pair in pairs)) if pairs else None
@@ -477,7 +488,7 @@ def _diagnostics(
                     "evidence": (
                         f"median candidate/reference dominant-frequency ratio is {ratio:.3f}"
                         if ratio is not None
-                        else f"threshold failures in {', '.join(sorted(failed_bands))}"
+                        else "dominant-frequency or FFT-band threshold failure"
                     ),
                     "hint": "A frequency-dependent transition shift suggests an FFT sample-rate, size or bin-boundary mismatch.",
                 }
@@ -618,10 +629,12 @@ def compare(reference_path: str | Path, candidate_path: str | Path, case_path: s
         if (
             not isinstance(search_range_ms, (int, float))
             or search_range_ms <= 0
+            or search_range_ms > 10_000
             or not isinstance(step_ms, (int, float))
             or step_ms <= 0
+            or 2 * search_range_ms / step_ms > 10_000
         ):
-            raise ValueError("automatic alignment search range and step must be positive numbers")
+            raise ValueError("automatic alignment search range/step must be positive and bounded")
         offset_ns, alignment_confidence = _estimate_offset(
             reference,
             candidate,
@@ -643,7 +656,9 @@ def compare(reference_path: str | Path, candidate_path: str | Path, case_path: s
     max_distance_ms = alignment.get("maximum_pair_distance_ms", 30)
     if not isinstance(max_distance_ms, (int, float)) or max_distance_ms < 0:
         raise ValueError("maximum_pair_distance_ms must be a non-negative number")
-    pairs = _time_pairs(reference_window, candidate_window, offset_ns)
+    pairs = _time_pairs(
+        reference_window, candidate_window, offset_ns, int(max_distance_ms * 1_000_000)
+    )
     coverage = len(pairs) / len(reference_window) if reference_window else 0
     minimum_coverage = case.get("minimum_coverage", 0.8)
     if not isinstance(minimum_coverage, (int, float)) or not 0 <= minimum_coverage <= 1:

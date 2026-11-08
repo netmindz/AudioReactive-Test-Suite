@@ -15,7 +15,7 @@ from audioreactive_suite.cli import main
 from audioreactive_suite.compare import EXIT_INCONCLUSIVE, EXIT_PASS, EXIT_THRESHOLD_FAILURE, compare
 from audioreactive_suite.capture import capture_udp
 from audioreactive_suite.execution import run_case
-from audioreactive_suite.model import compare_to_models
+from audioreactive_suite.model import _fingerprint, _read_wav, compare_to_models
 from audioreactive_suite.packet import decode_packet
 from audioreactive_suite.stimuli import SAMPLE_RATE_HZ, create_sample_set
 
@@ -119,12 +119,16 @@ class StimulusTests(unittest.TestCase):
 
     def test_reference_model_reports_ranked_profile_hypotheses(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            manifest = create_sample_set(directory)
+            create_sample_set(directory)
             audio = Path(directory) / "tone_688hz.wav"
-            packet = decode_packet(audio_sync_packet(1, "10.0.0.1:11988"))
+            sample_rate, samples = _read_wav(audio)
+            profile = _fingerprint(samples, sample_rate, pink_correction=False)
+            fft = tuple(round(value * 255) for value in profile)
+            packet = decode_packet(audio_sync_packet(1, "10.0.0.1:11988", fft=fft))
 
             result = compare_to_models(audio, [packet])
 
+        self.assertEqual(result["best_match"], "no_pink_correction")
         self.assertIn("linear_band_split", [item["model"] for item in result["ranked_hypotheses"]])
         self.assertIn("wrong_fft_size_256", [item["model"] for item in result["ranked_hypotheses"]])
         self.assertEqual(result["scope"].split(";")[0], "diagnostic fingerprint only")
@@ -306,6 +310,34 @@ class ComparisonTests(unittest.TestCase):
 
         self.assertEqual(report["band_shape_level"]["0"]["level_ratio_db"], 20 * math.log10(2))
         self.assertEqual(report["scorecard"]["normalized_profile_mae"], 0)
+
+    def test_tone_diagnostic_reports_expected_and_observed_bands(self) -> None:
+        reference_fft = [0] * 16
+        candidate_fft = [0] * 16
+        reference_fft[6] = 200
+        candidate_fft[8] = 200
+        reference_packets = [
+            audio_sync_packet(1_000_000_000 + index * 20_000_000, "10.0.0.1:11988", fft=tuple(reference_fft))
+            for index in range(3)
+        ]
+        candidate_packets = [
+            audio_sync_packet(1_000_000_000 + index * 20_000_000, "10.0.0.2:11988", fft=tuple(candidate_fft))
+            for index in range(3)
+        ]
+        write_capture(self.reference, "reference", reference_packets)
+        write_capture(self.candidate, "candidate", candidate_packets)
+        write_case(
+            self.case,
+            stimulus={"type": "tone", "frequency_hz": 688},
+            thresholds={"fft.6": {"mae": 0}},
+        )
+
+        report, exit_code = compare(self.reference, self.candidate, self.case)
+
+        self.assertEqual(exit_code, EXIT_THRESHOLD_FAILURE)
+        tone_diagnostic = next(item for item in report["diagnostics"] if item["category"] == "tone_band_mapping")
+        self.assertIn("expected band 6", tone_diagnostic["evidence"])
+        self.assertIn("6/8", tone_diagnostic["evidence"])
 
 
 class ExecutionTests(unittest.TestCase):

@@ -30,7 +30,11 @@ def _read_wav(path: Path) -> tuple[int, list[float]]:
 
 
 def _mapping_for(
-    fft_size: int, actual_rate: int, mapping: str, interpreted_rate: int | None = None
+    fft_size: int,
+    actual_rate: int,
+    mapping: str,
+    interpreted_rate: int | None = None,
+    frequency_distribution: int = 0,
 ) -> list[tuple[int, int]]:
     if mapping == "linear_band_split":
         maximum_bin = min(fft_size // 2 - 1, 215)
@@ -39,12 +43,23 @@ def _mapping_for(
             (max(1, math.floor(1 + band * width)), min(maximum_bin, math.ceil(1 + (band + 1) * width) - 1))
             for band in range(16)
         ]
+    if frequency_distribution == 1:
+        source_bands = [
+            (1, 1), (2, 2), (3, 3), (4, 4), (5, 6), (7, 8), (9, 10), (11, 13),
+            (14, 18), (19, 25), (26, 36), (37, 45), (46, 66), (67, 97), (98, 164), (165, 215),
+        ]
+    else:
+        source_bands = _REFERENCE_BANDS
     rate_ratio = actual_rate / interpreted_rate if interpreted_rate else 1.0
     max_bin = fft_size // 2 - 1
-    return [
-        (max(1, round(low * rate_ratio)), min(max_bin, round(high * rate_ratio)))
-        for low, high in _REFERENCE_BANDS
-    ]
+    mapped_bands = []
+    for low, high in source_bands:
+        mapped_low = max(1, round(low * rate_ratio))
+        mapped_high = min(max_bin, round(high * rate_ratio))
+        mapped_bands.append(
+            (mapped_low, mapped_high) if mapped_low <= mapped_high else (max_bin + 1, max_bin)
+        )
+    return mapped_bands
 
 
 def _fingerprint(
@@ -54,11 +69,12 @@ def _fingerprint(
     fft_size: int = 512,
     mapping: str = "reference",
     interpreted_rate: int | None = None,
+    frequency_distribution: int = 0,
     pink_correction: bool = True,
     scaling: str = "sqrt",
 ) -> list[float]:
     hop = max(1, round(sample_rate * 0.02))
-    bands = _mapping_for(fft_size, sample_rate, mapping, interpreted_rate)
+    bands = _mapping_for(fft_size, sample_rate, mapping, interpreted_rate, frequency_distribution)
     window = [
         0.35875
         - 0.48829 * math.cos(2 * math.pi * index / (fft_size - 1))
@@ -127,15 +143,71 @@ def compare_to_models(
     """Rank simplified DSP hypotheses by normalized FFT-band profile similarity."""
     settings = settings or {}
     sample_rate, samples = _read_wav(Path(audio_path))
-    reference = _fingerprint(samples, sample_rate)
+    configured_rate = settings.get("sample_rate_hz", sample_rate)
+    if not isinstance(configured_rate, int) or configured_rate <= 0:
+        configured_rate = sample_rate
+    configured_fft_size = settings.get("fft_size", 512)
+    if not isinstance(configured_fft_size, int) or configured_fft_size < 32 or configured_fft_size & (configured_fft_size - 1):
+        configured_fft_size = 512
+    frequency_distribution = settings.get("frequency_distribution", 0)
+    if frequency_distribution not in (0, 1):
+        frequency_distribution = 0
+    reference = _fingerprint(
+        samples,
+        sample_rate,
+        fft_size=configured_fft_size,
+        interpreted_rate=configured_rate,
+        frequency_distribution=frequency_distribution,
+    )
+    wrong_rate = 18_000 if configured_rate != 18_000 else 22_050
+    wrong_fft_size = 256 if configured_fft_size != 256 else 1024
     hypotheses = {
         "reference_fingerprint": reference,
-        "linear_band_split": _fingerprint(samples, sample_rate, mapping="linear_band_split"),
-        "wrong_sample_rate_18000_hz": _fingerprint(samples, sample_rate, interpreted_rate=18_000),
-        "wrong_fft_size_256": _fingerprint(samples, sample_rate, fft_size=256),
-        "no_pink_correction": _fingerprint(samples, sample_rate, pink_correction=False),
-        "wrong_scaling_linear": _fingerprint(samples, sample_rate, scaling="linear"),
-        "wrong_scaling_log": _fingerprint(samples, sample_rate, scaling="log"),
+        "linear_band_split": _fingerprint(
+            samples,
+            sample_rate,
+            fft_size=configured_fft_size,
+            mapping="linear_band_split",
+            interpreted_rate=configured_rate,
+        ),
+        f"wrong_sample_rate_{wrong_rate}_hz": _fingerprint(
+            samples,
+            sample_rate,
+            fft_size=configured_fft_size,
+            interpreted_rate=wrong_rate,
+            frequency_distribution=frequency_distribution,
+        ),
+        f"wrong_fft_size_{wrong_fft_size}": _fingerprint(
+            samples,
+            sample_rate,
+            fft_size=wrong_fft_size,
+            interpreted_rate=configured_rate,
+            frequency_distribution=frequency_distribution,
+        ),
+        "no_pink_correction": _fingerprint(
+            samples,
+            sample_rate,
+            fft_size=configured_fft_size,
+            interpreted_rate=configured_rate,
+            frequency_distribution=frequency_distribution,
+            pink_correction=False,
+        ),
+        "wrong_scaling_linear": _fingerprint(
+            samples,
+            sample_rate,
+            fft_size=configured_fft_size,
+            interpreted_rate=configured_rate,
+            frequency_distribution=frequency_distribution,
+            scaling="linear",
+        ),
+        "wrong_scaling_log": _fingerprint(
+            samples,
+            sample_rate,
+            fft_size=configured_fft_size,
+            interpreted_rate=configured_rate,
+            frequency_distribution=frequency_distribution,
+            scaling="log",
+        ),
     }
     if candidate_packets:
         levels = [

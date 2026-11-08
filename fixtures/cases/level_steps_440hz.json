@@ -24,7 +24,8 @@
     {"id": "step-1", "start": 500, "end": 1000},
     {"id": "step-2", "start": 1000, "end": 2000},
     {"id": "step-3", "start": 2000, "end": 3000},
-    {"id": "step-4", "start": 3000, "end": 4000}
+    {"id": "step-4", "start": 3000, "end": 4000},
+    {"id": "step-5", "start": 4000, "end": 4500}
   ],
   "thresholds": {
     "volume_raw": {"mae": 25},
